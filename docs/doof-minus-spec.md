@@ -89,4 +89,4 @@ Supported instructions are:
 
 Interfaces and `any` cannot be boxed directly; box the concrete class value. A failed `cast` traps. Other invalid runtime operations, such as division by zero, follow Wasm trap behavior. The compiler rejects malformed types, calls, interface implementations, and control-flow edges before emission.
 
-Strings, arrays, closures, weak references, inheritance, generics, and source-level sum types are outside this language. A producer can lower a sum type to `any` with `is` and `cast`, and can lower higher-level collections to classes when their required storage operations are available.
+Strings, arrays, closures, weak references, inheritance, generics, and source-level sum types are outside this language. A source compiler can represent a union as `any`, box each member, and use `is` and `cast` to inspect it.

@@ -12,6 +12,7 @@ Replace the input and output paths for the other examples:
 ```sh
 doof run src/doof-cli.do -- examples/doof-wasm/control-flow.do /tmp/control-flow.wasm
 doof run src/doof-cli.do -- examples/doof-wasm/objects.do /tmp/objects.wasm
+doof run src/doof-cli.do -- examples/doof-wasm/nullable-branches.do /tmp/nullable-branches.wasm
 ```
 
 To inspect the lowered doof-- without compiling Wasm, add `--dump-minus`:
@@ -25,3 +26,7 @@ example, `answer` takes no arguments and returns an `int`; `sumTo` demonstrates
 a loop-carried local value; and `readAfterIncrement` constructs a class, calls
 an instance method, converts it to an interface, and dispatches through that
 interface.
+
+`nullable-branches.do` combines `else if` branches with an `int | none` return
+value. A `case` statement checks the boxed tag and captures the integer arm;
+`unwrapOrMinusOne` also demonstrates nullable `else` unwrapping.

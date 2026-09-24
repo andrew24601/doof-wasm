@@ -11,13 +11,17 @@ the full Doof compiler.
   implementations.
 - Interfaces with fields and method signatures.
 - `none`, `bool`, `char`, `byte`, `short`, `int`, `long`, `float`, `double`,
-  classes, interfaces, and `SerialValue` (lowered to doof-- `any`).
-- Local `let`, `readonly`, and inferred immutable bindings; returns; `if` and
-  `if`/`else` branches that rejoin; and `while` loops.
+  classes, interfaces, `SerialValue`, and union types (lowered to doof--
+  `any`).
+- Local `let`, `readonly`, and inferred immutable bindings; returns; `if`,
+  `if`/`else`, and `else if` branches that rejoin; union `case` statements with
+  type captures, `none`, and wildcard arms; and `while` loops.
 - Arithmetic `+`, `-`, `*`, `/`; comparisons `==`, `!=`, `<`, `>`; unary `-`
   and `!`; direct and instance calls; field reads and writes; named class
   construction; class-to-interface assignment; numeric conversion; and `any`
-  boxing/casts.
+  boxing/casts. Union members are boxed into `any`; comparisons with `none`
+  test the contained tag. A nullable value can be unwrapped with the `else`
+  binding form.
 
 Local bindings are converted to doof-- SSA values. Values that cross branches
 or loop edges are passed as block arguments.
@@ -25,8 +29,9 @@ or loop edges are passed as block arguments.
 ## Not supported yet
 
 Imports and multiple source files, generics, strings, arrays, enums, type
-aliases, `else if`, labeled loops, `break`, `continue`, while-else clauses, default arguments or
-field values, static members, weak references, closures, pattern matching,
+aliases, labeled loops, `break`, `continue`, while-else clauses, default arguments or
+field values, static members, weak references, closures, case expressions,
+value/range patterns, and multiple patterns per case arm,
 async code, compound assignments, nested lexical blocks, and other source expressions. The doof-- backend
 already supports more control flow and runtime operations; the source lowering
 will grow to cover those as the subset is developed.
