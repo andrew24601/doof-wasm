@@ -1,0 +1,92 @@
+# doof--: minimal language specification
+
+doof-- is a lowered, typed, line-oriented language. It is the input to this package's WebAssembly compiler, not a source spelling of Doof. A file contains class, interface, and function declarations. `#` begins a comment. Names and type names are case-sensitive. Calls and construction use positional arguments only; there are no defaults.
+
+## Types
+
+The built-in types are `none`, `bool`, `char`, `byte`, `short`, `int`, `long`, `float`, `double`, and `any`. `any` is a tagged value carrier, not a class. Other type names must name a class or interface in the module.
+
+| Type | Meaning | Wasm carrier |
+| --- | --- | --- |
+| `none` | Sole value `none` | No function result; i32 zero where stored or passed |
+| `bool` | `true` or `false` | i32, zero or one |
+| `char` | Unicode scalar value, written as a decimal code point | i32 |
+| `byte` | Unsigned 8-bit integer | i32 |
+| `short` | Signed 16-bit integer | i32 |
+| `int` | Signed 32-bit integer | i32 |
+| `long` | Signed 64-bit integer | i64 |
+| `float` | IEEE 754 binary32 | f32 |
+| `double` | IEEE 754 binary64 | f64 |
+| Class, interface, `any` | Owned heap reference | i32 pointer |
+
+Class references are non-null. Use `any` containing `none` when absence must be represented. Integer arithmetic wraps to its type's width; integer division traps on zero. Floating arithmetic follows Wasm. Explicit numeric conversions use Wasm conversion instructions: narrowing integer conversions wrap, while invalid floating-to-integer conversions trap. `char` constants must be Unicode scalar values, excluding surrogates.
+
+## Declarations
+
+```text
+interface HasValue
+field let value:int
+method get() -> int
+end
+
+class Box implements HasValue
+field let value:int
+end
+
+func Box.get(%self:Box) -> int
+block entry
+%v:int = get %self.value
+return %v
+end
+```
+
+`field name:type` is immutable after construction; `field let name:type` is writable. Fields are constructed in declaration order. An interface may declare fields and methods. An implementation must explicitly list the interface and supply compatible fields and a function named `Class.method` with the class receiver first. Method parameters and results must match the interface declaration exactly. Classes have no inheritance or generic parameters.
+
+Functions use `func name(%arg:type, ...) -> type`; `export func` exposes a function to the Wasm host. Exported parameters and results must be primitive. Class methods are ordinary functions named `Class.method` with a receiver as their first parameter.
+
+## Blocks and instructions
+
+Each function starts with an entry block without parameters. A block ends in exactly one `return`, `jump`, or `branch`. Values are defined once per function. A block can read function parameters and its own parameters and results. Values crossing an edge must be supplied as block arguments.
+
+```text
+export func count(%limit:int) -> int
+block entry
+%zero:int = const 0
+jump loop(%zero)
+block loop(%n:int)
+%again:bool = lt %n, %limit
+branch %again step(%n) done(%n)
+block step(%old:int)
+%one:int = const 1
+%next:int = add %old, %one
+jump loop(%next)
+block done(%answer:int)
+return %answer
+end
+```
+
+Supported instructions are:
+
+| Form | Result or effect |
+| --- | --- |
+| `%r:T = const literal` | Primitive constant; `char` uses a decimal code point |
+| `%r:T = add/sub/mul/div %a, %b` | Matching numeric operands and result |
+| `%r:bool = eq/lt %a, %b` | Matching numeric operands; `eq` also accepts `bool`, `char`, and `none`; `lt` also accepts `char` |
+| `%r:T = convert %a` | Explicit conversion between numeric types |
+| `%r:T = copy %a` | Copy a value; retains references |
+| `%r:C = new C(%a, ...)` | Allocate a class; arguments follow field order |
+| `%r:T = get %object.field` | Read a class or interface field |
+| `set %object.field = %value` | Replace a mutable field |
+| `%r:T = call function(%a, ...)` | Direct function call |
+| `%r:T = call %object.method(%a, ...)` | Class call or dynamic interface dispatch |
+| `%r:I = as %class` | Convert a class to an explicitly implemented interface |
+| `%r:any = box %a` | Box `none`, a primitive, or a concrete class |
+| `%r:bool = is %box T` | Test the contained concrete type tag |
+| `%r:T = cast %box T` | Recover a value; traps if its tag differs |
+| `jump block(%a, ...)` | Transfer values to block parameters |
+| `branch %bool yes(%a, ...) no(%b, ...)` | Conditional transfer |
+| `return` / `return %value` | Return `none` / a typed value |
+
+Interfaces and `any` cannot be boxed directly; box the concrete class value. A failed `cast` traps. Other invalid runtime operations, such as division by zero, follow Wasm trap behavior. The compiler rejects malformed types, calls, interface implementations, and control-flow edges before emission.
+
+Strings, arrays, closures, weak references, inheritance, generics, and source-level sum types are outside this language. A producer can lower a sum type to `any` with `is` and `cast`, and can lower higher-level collections to classes when their required storage operations are available.
