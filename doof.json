@@ -1,6 +1,9 @@
 {
-  "name": "doof-wasm-ir",
+  "name": "doof-wasm",
   "version": "0.2.0",
   "license": "ISC",
-  "dependencies": {}
+  "dependencies": {
+    "doof": { "path": "../doof-lang" }
+  },
+  "build": { "entry": "src/doof-cli.do" }
 }
