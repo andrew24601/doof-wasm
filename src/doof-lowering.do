@@ -527,7 +527,11 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
             found = true
           }
         }
-        if !found { context.failed = "all class fields must be initialized explicitly"; return "" }
+        if !found {
+          if field.defaultValue == none { context.failed = "required class field " + field.names[0] + " is missing"; return "" }
+          args.push(lowerExpected(context, field.defaultValue!, annotationName(field.resolvedType)))
+          if context.failed != "" { return "" }
+        }
       }
       return result(context, "new", args, typeFromValue(expression))
     }
@@ -544,14 +548,84 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
 }
 
 function lowerCall(context: FunctionLowering, call: CallExpression, expression: Expression): string {
+  if call.resolvedClass != none {
+    class_ := call.resolvedClass!
+    if call.resolvedConstructor != none {
+      context.failed = "class constructor factories are not supported by doof-wasm"
+      return ""
+    }
+    let supplied: string[] = []
+    for field of class_.fields { supplied.push("") }
+    let positionalIndex = 0
+    let hasNamed = false
+    for argument of call.args { if argument.name != none { hasNamed = true } }
+    for argument of call.args {
+      let fieldIndex_ = positionalIndex
+      if hasNamed {
+        if argument.name == none { context.failed = "named construction cannot mix named and positional arguments"; return "" }
+        fieldIndex_ = -1
+        for index of 0..<class_.fields.length {
+          if class_.fields[index].names.length == 1 && class_.fields[index].names[0] == argument.name! { fieldIndex_ = index }
+        }
+        if fieldIndex_ < 0 { context.failed = "unknown construction field " + argument.name!; return "" }
+      } else { positionalIndex = positionalIndex + 1 }
+      if fieldIndex_ >= class_.fields.length { context.failed = "too many construction arguments"; return "" }
+      field := class_.fields[fieldIndex_]
+      if field.names.length != 1 { context.failed = "multiple-name fields are not supported by doof-wasm"; return "" }
+      supplied[fieldIndex_] = lowerExpected(context, argument.value, annotationName(field.resolvedType))
+      if context.failed != "" { return "" }
+    }
+    let args: string[] = [class_.name]
+    for index of 0..<class_.fields.length {
+      field := class_.fields[index]
+      if field.names.length != 1 { context.failed = "multiple-name fields are not supported by doof-wasm"; return "" }
+      if supplied[index] != "" { args.push(supplied[index]); continue }
+      if field.defaultValue == none { context.failed = "missing required construction field " + field.names[0]; return "" }
+      args.push(lowerExpected(context, field.defaultValue!, annotationName(field.resolvedType)))
+      if context.failed != "" { return "" }
+    }
+    return result(context, "new", args, typeFromValue(expression))
+  }
   let receiver = ""
   case call.callee { member: MemberExpression -> { receiver = lowerExpression(context, member.object) } _ -> { } }
   let args: string[] = []
-  for index of 0..<call.args.length {
-    argument := call.args[index]
-    if argument.name != none { context.failed = "named call arguments are not supported by doof-wasm"; return "" }
-    expected := callParameterType(call, index)
-    args.push(if expected == "" then lowerExpression(context, argument.value) else lowerExpected(context, argument.value, expected))
+  let hasNamed = false
+  for argument of call.args { if argument.name != none { hasNamed = true } }
+  if call.resolvedFunction != none {
+    parameters := call.resolvedFunction!.params
+    let supplied: string[] = []
+    for _ of parameters { supplied.push("") }
+    let positionalIndex = 0
+    // Evaluate provided expressions in source order, then arrange their SSA
+    // values in declaration order for the fixed-arity doof-- call.
+    for argument of call.args {
+      let parameterIndex = positionalIndex
+      if hasNamed {
+        if argument.name == none { context.failed = "named calls cannot mix named and positional arguments"; return "" }
+        parameterIndex = -1
+        for index of 0..<parameters.length {
+          if parameters[index].name == argument.name! { parameterIndex = index }
+        }
+        if parameterIndex < 0 { context.failed = "unknown named argument " + argument.name!; return "" }
+      } else { positionalIndex = positionalIndex + 1 }
+      if parameterIndex >= parameters.length { context.failed = "too many call arguments"; return "" }
+      expected := annotationName(parameters[parameterIndex].resolvedType)
+      supplied[parameterIndex] = lowerExpected(context, argument.value, expected)
+      if context.failed != "" { return "" }
+    }
+    for index of 0..<parameters.length {
+      if supplied[index] != "" { args.push(supplied[index]); continue }
+      parameter := parameters[index]
+      if parameter.defaultValue == none { context.failed = "missing required argument " + parameter.name; return "" }
+      args.push(lowerExpected(context, parameter.defaultValue!, annotationName(parameter.resolvedType)))
+      if context.failed != "" { return "" }
+    }
+  } else {
+    if hasNamed { context.failed = "named calls require a declaration-backed function"; return "" }
+    for index of 0..<call.args.length {
+      expected := callParameterType(call, index)
+      args.push(if expected == "" then lowerExpression(context, call.args[index].value) else lowerExpected(context, call.args[index].value, expected))
+    }
   }
   if context.failed != "" { return "" }
   case call.callee {
@@ -712,7 +786,6 @@ function lowerFunction(fn: FunctionDeclaration, className: string = "", interfac
     context.bindings.push(SourceBinding { name: "this", typeName: className, valueName: "%self", parameter: true })
   }
   for parameter of fn.params {
-    if parameter.defaultValue != none { return Failure("default parameter values are not supported by doof-wasm") }
     typeName := annotationName(parameter.resolvedType)
     if typeName == "" { return Failure("unsupported parameter type on " + fn.name) }
     valueName := "%arg" + string(params.length)
@@ -747,8 +820,8 @@ function lowerTypes(program: Program, module_: MinusModule): Result<none, string
           classOut.interfaces.push(implemented.name)
         }
         for field of class_.fields {
-          if field.static_ || field.weak_ || field.names.length != 1 || field.defaultValue != none {
-            return Failure("static, weak, multiple, and defaulted fields are not supported by doof-wasm")
+          if field.static_ || field.weak_ || field.names.length != 1 {
+            return Failure("static, weak, and multiple fields are not supported by doof-wasm")
           }
           typeName := annotationName(field.resolvedType)
           if typeName == "" { return Failure("unsupported field type in " + class_.name) }

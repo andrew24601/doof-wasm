@@ -7,8 +7,12 @@ the full Doof compiler.
 ## Supported source constructs
 
 - Free functions and instance methods with explicit parameter and result types.
-- Classes with non-static, non-weak fields, plus explicit interface
-  implementations.
+- Trailing default parameter values on supported free functions and instance
+  methods, for positional and named calls. Omitted defaults are lowered at
+  each call site.
+- Classes with non-static, non-weak fields, including field defaults evaluated
+  when a class is constructed with positional or named arguments, plus
+  explicit interface implementations.
 - Interfaces with fields and method signatures.
 - `none`, `bool`, `char`, `byte`, `short`, `int`, `long`, `float`, `double`,
   classes, interfaces, `SerialValue`, and union types (lowered to doof--
@@ -17,8 +21,9 @@ the full Doof compiler.
   `if`/`else`, and `else if` branches that rejoin; union `case` statements with
   type captures, `none`, and wildcard arms; and `while` loops.
 - Arithmetic `+`, `-`, `*`, `/`; comparisons `==`, `!=`, `<`, `>`; unary `-`
-  and `!`; direct and instance calls; field reads and writes; named class
-  construction; class-to-interface assignment; numeric conversion; and `any`
+  and `!`; direct, instance, and named calls; field reads and writes;
+  positional and named class construction; class-to-interface assignment;
+  numeric conversion; and `any`
   boxing/casts. Union members are boxed into `any`; comparisons with `none`
   test the contained tag. A nullable value can be unwrapped with the `else`
   binding form.
@@ -29,8 +34,8 @@ or loop edges are passed as block arguments.
 ## Not supported yet
 
 Imports and multiple source files, generics, strings, arrays, enums, type
-aliases, labeled loops, `break`, `continue`, while-else clauses, default arguments or
-field values, static members, weak references, closures, case expressions,
+aliases, labeled loops, `break`, `continue`, while-else clauses, static
+members, weak references, closures, case expressions,
 value/range patterns, and multiple patterns per case arm,
 async code, compound assignments, nested lexical blocks, and other source expressions. The doof-- backend
 already supports more control flow and runtime operations; the source lowering
