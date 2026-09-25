@@ -1,5 +1,5 @@
 import { parseByte, parseDouble, parseFloat, parseInt, parseLong } from "std/parse"
-import { MinusBlock, MinusClass, MinusField, MinusFunction, MinusInstruction, MinusInterface, MinusMethod, MinusModule, MinusValue } from "./minus-ir"
+import { MinusBlock, MinusClass, MinusField, MinusFunction, MinusImport, MinusInstruction, MinusInterface, MinusMethod, MinusModule, MinusValue } from "./minus-ir"
 import { classSize } from "./minus-layout"
 
 readonly MAX_BLOCK_SIZE = 1032
@@ -18,6 +18,9 @@ function interfaceByName(module_: MinusModule, name: string): MinusInterface | n
 
 function functionByName(module_: MinusModule, name: string): MinusFunction | none {
     for item of module_.functions { if item.name == name { return item } }
+    for item of module_.imports {
+        if item.name == name { return MinusFunction { name: item.name, params: item.params, result: item.result, line: item.line, sourcePath: item.sourcePath } }
+    }
     return none
 }
 
@@ -29,6 +32,7 @@ function blockByName(function_: MinusFunction, name: string): MinusBlock | none 
 function primitive(typeName: string): bool => ["none", "bool", "char", "byte", "short", "int", "long", "float", "double"].contains(typeName)
 function numeric(typeName: string): bool => ["byte", "short", "int", "long", "float", "double"].contains(typeName)
 function reference(module_: MinusModule, typeName: string): bool => typeName == "any" || classByName(module_, typeName) != none || interfaceByName(module_, typeName) != none
+function hostExportType(module_: MinusModule, typeName: string): bool => !reference(module_, typeName) || typeName == "__doof_string"
 
 function identifier(name: string): bool {
     if name == "" { return false }
@@ -105,7 +109,7 @@ function checkLiteral(instruction: MinusInstruction, typeName: string): Result<n
     if typeName == "short" || typeName == "int" || typeName == "char" {
         parsed := parseInt(literal) else { return Failure(problem(instruction.line, "invalid integer constant")) }
         if typeName == "short" && (parsed < -32768 || parsed > 32767) { return Failure(problem(instruction.line, "short constant out of range")) }
-        if typeName == "char" && (parsed < 0 || parsed > 1114111 || (parsed >= 55296 && parsed <= 57343)) { return Failure(problem(instruction.line, "char constant must be a Unicode scalar")) }
+        if typeName == "char" && (parsed < 0 || parsed > 255) { return Failure(problem(instruction.line, "char constant must fit in one UTF-8 byte")) }
         return Success(none)
     }
     if typeName == "long" { _ := parseLong(literal) else { return Failure(problem(instruction.line, "invalid long constant")) }; return Success(none) }
@@ -127,6 +131,13 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
     op := instruction.op
     resultType := if instruction.result == none then "none" else instruction.result!.typeName
     if op == "const" { try checkLiteral(instruction, resultType); return Success(resultType) }
+    if op == "string-const" {
+        if args.length != 1 { return Failure(problem(line, "string-const needs one literal")) }
+        if resultType != "__doof_string" || classByName(module_, resultType) == none {
+            return Failure(problem(line, "string-const needs a __doof_string result"))
+        }
+        return Success(resultType)
+    }
     if ["add", "sub", "mul", "div", "eq", "lt"].contains(op) {
         if args.length != 2 { return Failure(problem(line, op + " needs two operands")) }
         try left := valueType(values, args[0], line)
@@ -144,6 +155,42 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         for field of class_!.fields { expected.push(field.typeName) }
         try checkArgs(values, tail(args, 1), expected, line)
         return Success(class_!.name)
+    }
+    if op == "array-alloc" {
+        if args.length != 2 { return Failure(problem(line, "array-alloc needs a length and element type")) }
+        try lengthType := valueType(values, args[0], line)
+        if lengthType != "int" { return Failure(problem(line, "array length needs int")) }
+        if !["bool", "char", "byte", "short", "int", "long", "float", "double"].contains(args[1]) { return Failure(problem(line, "unsupported array element type " + args[1])) }
+        return Success("int")
+    }
+    if op == "array-free" {
+        if args.length != 1 { return Failure(problem(line, "array-free needs one block handle")) }
+        try handleType := valueType(values, args[0], line)
+        if handleType != "int" { return Failure(problem(line, "array-free needs an int block handle")) }
+        return Success(none)
+    }
+    if op == "array-length" {
+        if args.length != 1 { return Failure(problem(line, "array-length needs one block handle")) }
+        try handleType := valueType(values, args[0], line)
+        if handleType != "int" { return Failure(problem(line, "array-length needs an int block handle")) }
+        return Success("int")
+    }
+    if op == "array-get" {
+        if args.length != 2 { return Failure(problem(line, "array-get needs a block handle and index")) }
+        try handleType := valueType(values, args[0], line)
+        try indexType := valueType(values, args[1], line)
+        if handleType != "int" || indexType != "int" { return Failure(problem(line, "array-get needs int handle and index")) }
+        if !["bool", "char", "byte", "short", "int", "long", "float", "double"].contains(resultType) { return Failure(problem(line, "unsupported array element type " + resultType)) }
+        return Success(resultType)
+    }
+    if op == "array-set" {
+        if args.length != 3 { return Failure(problem(line, "array-set needs a block handle, index, and value")) }
+        try handleType := valueType(values, args[0], line)
+        try indexType := valueType(values, args[1], line)
+        try elementType := valueType(values, args[2], line)
+        if handleType != "int" || indexType != "int" { return Failure(problem(line, "array-set needs int handle and index")) }
+        if !["bool", "char", "byte", "short", "int", "long", "float", "double"].contains(elementType) { return Failure(problem(line, "unsupported array element type " + elementType)) }
+        return Success(none)
     }
     if op == "get" || op == "set" {
         if args.length != (if op == "get" then 2 else 3) { return Failure(problem(line, "invalid field operation")) }
@@ -209,6 +256,10 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         if typeName != function_.result { return Failure(problem(line, "return needs " + function_.result)) }
         return Success(none)
     }
+    if op == "panic" {
+        if args.length != 0 { return Failure(problem(line, "panic takes no lowered arguments")) }
+        return Success(none)
+    }
     if op == "jump" { try checkEdge(function_, values, args, line); return Success(none) }
     if op == "branch" {
         if args.length < 4 { return Failure(problem(line, "branch needs two targets")) }
@@ -248,6 +299,12 @@ export function validateDoofMinus(module_: MinusModule): Result<none, string> {
             for previous of 0..<index { if owner.fields[previous].name == field.name { return Failure(problem(field.line, "duplicate field")) } }
         }
         if classSize(owner) > MAX_BLOCK_SIZE { return Failure(problem(owner.line, "class allocation exceeds 1032 bytes")) }
+        if owner.finalizer != "" {
+            finalizerFunction := functionByName(module_, owner.finalizer)
+            if finalizerFunction == none || finalizerFunction!.exported || finalizerFunction!.result != "none" || finalizerFunction!.params.length != 1 || finalizerFunction!.params[0].typeName != owner.name {
+                return Failure(problem(owner.line, "destructor must name a private function taking its class and returning none"))
+            }
+        }
     }
     for owner of module_.interfaces {
         for index of 0..<owner.fields.length {
@@ -290,12 +347,14 @@ export function validateDoofMinus(module_: MinusModule): Result<none, string> {
         if !functionName(function_.name) { return Failure(problem(function_.line, "invalid function name")) }
         for previous of 0..<index { if module_.functions[previous].name == function_.name { return Failure(problem(function_.line, "duplicate function")) } }
         try checkType(module_, function_.result, function_.line)
-        if function_.exported && reference(module_, function_.result) { return Failure(problem(function_.line, "export result must be primitive")) }
+        exportName := if function_.exportName == "" then function_.name else function_.exportName
+        if function_.exported && ["__doof_ffi_alloc", "__doof_ffi_release", "__doof_ffi_memory", "__doof_debug_heap_end"].contains(exportName) { return Failure(problem(function_.line, "export name is reserved by the Wasm host bindings")) }
+        if function_.exported && !hostExportType(module_, function_.result) { return Failure(problem(function_.line, "export result must be primitive or string")) }
         let defined: MinusValue[] = []
         for param of function_.params {
             if !valueName(param.name) { return Failure(problem(function_.line, "invalid parameter name")) }
             try checkType(module_, param.typeName, function_.line)
-            if function_.exported && reference(module_, param.typeName) { return Failure(problem(function_.line, "export parameter must be primitive")) }
+            if function_.exported && !hostExportType(module_, param.typeName) { return Failure(problem(function_.line, "export parameter must be primitive or string")) }
             for known of defined { if known.name == param.name { return Failure(problem(function_.line, "duplicate parameter")) } }
             defined.push(param)
         }
@@ -323,7 +382,7 @@ export function validateDoofMinus(module_: MinusModule): Result<none, string> {
             for param of block.params { available.push(param) }
             for position of 0..<block.instructions.length {
                 instruction := block.instructions[position]
-                terminal := ["return", "jump", "branch"].contains(instruction.op)
+                terminal := ["return", "jump", "branch", "panic"].contains(instruction.op)
                 if terminal != (position == block.instructions.length - 1) { return Failure(problem(instruction.line, "block terminator must be last")) }
                 if instruction.result != none {
                     if !valueName(instruction.result!.name) { return Failure(problem(instruction.line, "invalid value name")) }
@@ -340,6 +399,27 @@ export function validateDoofMinus(module_: MinusModule): Result<none, string> {
                     available.push(instruction.result!)
                 }
             }
+        }
+    }
+    for index of 0..<module_.imports.length {
+        import_ := module_.imports[index]
+        if !functionName(import_.name) || import_.importModule == "" || import_.importName == "" { return Failure(problem(import_.line, "invalid host import declaration")) }
+        for previous of 0..<index {
+            prior := module_.imports[previous]
+            if prior.name == import_.name { return Failure(problem(import_.line, "duplicate host import")) }
+            if prior.importModule == import_.importModule && prior.importName == import_.importName {
+                if prior.result != import_.result || prior.params.length != import_.params.length { return Failure(problem(import_.line, "host imports sharing a JS binding must have the same signature")) }
+                for paramIndex of 0..<prior.params.length {
+                    if prior.params[paramIndex].typeName != import_.params[paramIndex].typeName { return Failure(problem(import_.line, "host imports sharing a JS binding must have the same signature")) }
+                }
+            }
+        }
+        for function_ of module_.functions { if function_.name == import_.name { return Failure(problem(import_.line, "host import conflicts with function")) } }
+        try checkType(module_, import_.result, import_.line)
+        if !hostExportType(module_, import_.result) { return Failure(problem(import_.line, "host import result must be primitive or string")) }
+        for parameter of import_.params {
+            try checkType(module_, parameter.typeName, import_.line)
+            if !hostExportType(module_, parameter.typeName) { return Failure(problem(import_.line, "host import parameter must be primitive or string")) }
         }
     }
     return Success(none)

@@ -1,5 +1,5 @@
 // Human-readable doof-- rendering for inspecting an already-built model.
-import { MinusBlock, MinusFunction, MinusInstruction, MinusModule, MinusValue } from "./minus-ir"
+import { MinusBlock, MinusFunction, MinusImport, MinusInstruction, MinusModule, MinusValue } from "./minus-ir"
 
 function joined(values: string[], start: int = 0, stop: int = -1): string {
   let end = if stop < 0 then values.length else stop
@@ -48,6 +48,7 @@ function renderInstruction(instruction: MinusInstruction): string {
   if op == "jump" { return "jump " + target(args[0], args, 1, args.length) }
   if op == "branch" { return renderBranch(args) }
   if op == "return" { return "return" + (if args.length == 0 then "" else " " + args[0]) }
+  if op == "panic" { return "panic" }
   return prefix + op + " " + joined(args)
 }
 
@@ -62,6 +63,12 @@ function renderFunction(function_: MinusFunction): string {
   return output + "end\n"
 }
 
+function renderImport(import_: MinusImport): string {
+  let params: string[] = []
+  for parameter of import_.params { params.push(valueDeclaration(parameter)) }
+  return "import func " + import_.name + "(" + joined(params) + ") -> " + import_.result + " from " + import_.importModule + " as " + import_.importName + "\n"
+}
+
 /** Render a MinusModule as readable doof-- text for debugging or snapshots. */
 export function renderDoofMinus(module_: MinusModule): string {
   let output = ""
@@ -69,6 +76,7 @@ export function renderDoofMinus(module_: MinusModule): string {
     output += "class " + class_.name
     if class_.interfaces.length > 0 { output += " implements " + joined(class_.interfaces) }
     output += "\n"
+    if class_.finalizer != "" { output += "destructor " + class_.finalizer + "\n" }
     for field of class_.fields {
       output += "field " + (if field.mutable then "let " else "") + field.name + ":" + field.typeName + "\n"
     }
@@ -84,6 +92,7 @@ export function renderDoofMinus(module_: MinusModule): string {
     }
     output += "end\n"
   }
+  for import_ of module_.imports { output += renderImport(import_) }
   for function_ of module_.functions { output += renderFunction(function_) }
   return output
 }

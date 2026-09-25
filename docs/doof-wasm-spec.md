@@ -15,8 +15,23 @@ the full Doof compiler.
   explicit interface implementations.
 - Interfaces with fields and method signatures.
 - `none`, `bool`, `char`, `byte`, `short`, `int`, `long`, `float`, `double`,
+  `string`,
   classes, interfaces, `SerialValue`, and union types (lowered to doof--
-  `any`).
+  `any`), including aliases that resolve to supported types.
+- Mutable and read-only `byte[]` and `char[]` values, including literals,
+  `.length`, indexed reads, and indexed writes on mutable arrays. Array literals
+  are limited to 1024 elements. Other collection types remain unsupported by
+  source lowering.
+- Basic `string` values backed by an injected string class and a wrapped,
+  read-only `char[]`; string literals, `.length`, and indexed character reads
+  are supported. Content-based comparison operators, `.compare(other)`, and
+  `.indexOf(search)` are supported. Interpolation and other string methods
+  are not supported.
+- Host functions can be declared with `import function name(args): result`.
+  They become Wasm imports in the default `doof` namespace and are connected
+  through `createDoofImports(host)` from the generated JavaScript companion.
+  String arguments/results are bridged to JavaScript strings. An optional
+  `from "module"` selects a Wasm import namespace.
 - Local `let`, `readonly`, and inferred immutable bindings; returns; `if`,
   `if`/`else`, and `else if` branches that rejoin; union `case` statements with
   type captures, `none`, and wildcard arms; and `while` loops.
@@ -26,15 +41,16 @@ the full Doof compiler.
   numeric conversion; and `any`
   boxing/casts. Union members are boxed into `any`; comparisons with `none`
   test the contained tag. A nullable value can be unwrapped with the `else`
-  binding form.
+  binding form. The `panic(message)` intrinsic is supported as a terminating
+  trap; the Wasm backend discards its message.
 
 Local bindings are converted to doof-- SSA values. Values that cross branches
 or loop edges are passed as block arguments.
 
 ## Not supported yet
 
-Imports and multiple source files, generics, strings, arrays, enums, type
-aliases, labeled loops, `break`, `continue`, while-else clauses, static
+Imports and multiple source files, generics, arrays other than `byte[]` and `char[]`, enums, labeled
+loops, `break`, `continue`, while-else clauses, static
 members, weak references, closures, case expressions,
 value/range patterns, and multiple patterns per case arm,
 async code, compound assignments, nested lexical blocks, and other source expressions. The doof-- backend

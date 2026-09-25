@@ -101,10 +101,110 @@ return %c
 end
 export func charValue() -> char
 block entry
-%a:char = const 128512
+%a:char = const 255
 return %a
 end
-`, "primitives", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.shortSum()!==-32768||e.floatValue()!==3.75||e.doubleValue()!==3.75||e.longValue()!==10000000007n||e.byteValue()!==0||e.charValue()!==128512)process.exit(1)`)
+`, "primitives", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.shortSum()!==-32768||e.floatValue()!==3.75||e.doubleValue()!==3.75||e.longValue()!==10000000007n||e.byteValue()!==0||e.charValue()!==255)process.exit(1)`)
+}
+
+export function testTypedArrayDataOperationsAndFreeListReuse(): none {
+    runWasm(`
+export func run() -> int
+block entry
+%length:int = const 3
+%bytes:int = array-alloc %length, byte
+%zero:int = const 0
+%value:byte = const 201
+array-set %bytes, %zero, %value
+%actual:byte = array-get %bytes, %zero
+%count:int = array-length %bytes
+array-free %bytes
+return %count
+end
+export func onlyLength() -> int
+block entry
+%length:int = const 3
+%bytes:int = array-alloc %length, byte
+%count:int = array-length %bytes
+array-free %bytes
+return %count
+end
+export func maximum() -> int
+block entry
+%length:int = const 1024
+%bytes:int = array-alloc %length, byte
+%count:int = array-length %bytes
+array-free %bytes
+return %count
+end
+export func tooLarge() -> int
+block entry
+%length:int = const 1025
+%bytes:int = array-alloc %length, byte
+return %length
+end
+`, "array-data", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;for(let i=0;i<1000;i++)if(e.onlyLength()!==3||e.run()!==3)process.exit(1);if(e.maximum()!==1024)process.exit(2);try{e.tooLarge();process.exit(3)}catch(x){if(!(x instanceof WebAssembly.RuntimeError))process.exit(4)}`)
+}
+
+export function testTypedPrimitiveArrayWidths(): none {
+    runWasm(`
+export func mixed() -> int
+block entry
+%one:int = const 1
+%zero:int = const 0
+%shorts:int = array-alloc %one, short
+%shortValue:short = const -123
+array-set %shorts, %zero, %shortValue
+%readShort:short = array-get %shorts, %zero
+%shortAsInt:int = convert %readShort
+array-free %shorts
+%longs:int = array-alloc %one, long
+%longValue:long = const 4000000000
+array-set %longs, %zero, %longValue
+%readLong:long = array-get %longs, %zero
+%longAsInt:int = convert %readLong
+array-free %longs
+%doubles:int = array-alloc %one, double
+%doubleValue:double = const 3.75
+array-set %doubles, %zero, %doubleValue
+%readDouble:double = array-get %doubles, %zero
+%doubleAsInt:int = convert %readDouble
+array-free %doubles
+%floats:int = array-alloc %one, float
+%floatValue:float = const 1.5
+array-set %floats, %zero, %floatValue
+%readFloat:float = array-get %floats, %zero
+%floatAsInt:int = convert %readFloat
+array-free %floats
+%first:int = add %shortAsInt, %longAsInt
+%sum:int = add %first, %doubleAsInt
+%total:int = add %sum, %floatAsInt
+return %total
+end
+`, "typed-array-data", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.mixed()!==-294967415)process.exit(1)`)
+}
+
+export function testMinusDestructorFreesOwnedArrayData(): none {
+    runCappedWasm(`
+class Owner
+destructor Owner.destroy
+field handle:int
+end
+func Owner.destroy(%self:Owner) -> none
+block entry
+%handle:int = get %self.handle
+array-free %handle
+return
+end
+export func run() -> int
+block entry
+%length:int = const 1
+%data:int = array-alloc %length, byte
+%owner:Owner = new Owner(%data)
+%answer:int = const 42
+return %answer
+end
+`, "array-destructor", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;for(let i=0;i<2000;i++)if(e.run()!==42)process.exit(1)`)
 }
 
 export function testControlFlowAndConversions(): none {
@@ -146,7 +246,7 @@ block entry
 %empty:none = const none
 return %empty
 end
-`, "boundary", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.narrow(65535)!==-1||e.truth(7)!==1||e.character(128512)!==128512||e.nothing()!==undefined)process.exit(1);try{e.character(55296);process.exit(2)}catch(x){if(!(x instanceof WebAssembly.RuntimeError))process.exit(3)}`)
+`, "boundary", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.narrow(65535)!==-1||e.truth(7)!==1||e.character(255)!==255||e.nothing()!==undefined)process.exit(1);try{e.character(256);process.exit(2)}catch(x){if(!(x instanceof WebAssembly.RuntimeError))process.exit(3)}`)
 }
 
 export function testNumericConversionsAndComparisons(): none {
@@ -450,7 +550,7 @@ export function testDiagnostics(): none {
     rejected(`export func f() -> int\nblock entry\n%a:int = const 1\n%x:int = cast %a int\nreturn %x\nend`, "cast needs any")
     rejected(`export func f() -> int\nblock entry\n%a:int = const 1\njump next(%a)\nblock next(%x:long)\nreturn %a\nend`, "argument 1 needs long")
     rejected(`class Box\nfield value:int\nend\nexport func f() -> int\nblock entry\n%a:int = const 1\n%b:Box = new Box(%a)\nset %b.value = %a\nreturn %a\nend`, "immutable")
-    rejected(`export func f() -> char\nblock entry\n%c:char = const 55296\nreturn %c\nend`, "Unicode scalar")
+    rejected(`export func f() -> char\nblock entry\n%c:char = const 256\nreturn %c\nend`, "one UTF-8 byte")
     rejected(`interface I\nmethod get() -> int\nmethod get() -> int\nend`, "duplicate interface method")
     let oversized = "class Oversized\n"
     for index of 0..<129 { oversized += "field f" + string(index) + ":long\n" }

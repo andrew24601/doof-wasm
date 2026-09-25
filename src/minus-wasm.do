@@ -61,8 +61,16 @@ function tag(module_: MinusModule, typeName: string): int {
 }
 
 function functionIndex(module_: MinusModule, name_: string): int {
-    for index of 0..<module_.functions.length { if module_.functions[index].name == name_ { return index + 3 } }
+    for index of 0..<module_.imports.length { if module_.imports[index].name == name_ { return index } }
+    for index of 0..<module_.functions.length { if module_.functions[index].name == name_ { return module_.imports.length + index + 3 } }
     panic("validated function missing")
+}
+
+function runtimeFunctionIndex(module_: MinusModule, index: int): int => module_.imports.length + index
+
+function tableFunctionIndex(module_: MinusModule, name_: string): int {
+    for index of 0..<module_.functions.length { if module_.functions[index].name == name_ { return index + 3 } }
+    panic("validated method missing from function table")
 }
 
 function classByName(module_: MinusModule, name_: string): MinusClass {
@@ -111,10 +119,10 @@ function load(bytes: int[], typeName: string, offset: int): none {
     if typeName == "long" { code = 41 }
     if typeName == "float" { code = 42 }
     if typeName == "double" { code = 43 }
-    if typeName == "bool" || typeName == "byte" { code = 45 }
+    if typeName == "bool" || typeName == "byte" || typeName == "char" { code = 45 }
     if typeName == "short" { code = 46 }
     op(bytes, code)
-    unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "bool" || typeName == "byte" then 0 else 2)
+    unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "bool" || typeName == "byte" || typeName == "char" then 0 else 2)
     unsigned(bytes, offset)
 }
 function store(bytes: int[], typeName: string, offset: int): none {
@@ -122,10 +130,10 @@ function store(bytes: int[], typeName: string, offset: int): none {
     if typeName == "long" { code = 55 }
     if typeName == "float" { code = 56 }
     if typeName == "double" { code = 57 }
-    if typeName == "bool" || typeName == "byte" { code = 58 }
+    if typeName == "bool" || typeName == "byte" || typeName == "char" { code = 58 }
     if typeName == "short" { code = 59 }
     op(bytes, code)
-    unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "bool" || typeName == "byte" then 0 else 2)
+    unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "bool" || typeName == "byte" || typeName == "char" then 0 else 2)
     unsigned(bytes, offset)
 }
 function load32(bytes: int[], offset: int): none { load(bytes, "int", offset) }
@@ -161,7 +169,13 @@ function emitType(bytes: int[], params: string[], result: string): none {
 
 function functionTypes(module_: MinusModule): int[] {
     let bytes: int[] = []
-    unsigned(bytes, module_.functions.length + 3)
+    let constants = stringConstants(module_)
+    unsigned(bytes, module_.imports.length + module_.functions.length + 3 + if constants.length > 0 then 1 else 0)
+    for import_ of module_.imports {
+        let params: string[] = []
+        for parameter of import_.params { params.push(parameter.typeName) }
+        emitType(bytes, params, import_.result)
+    }
     emitType(bytes, ["int", "int"], "int") // alloc(size, tag)
     emitType(bytes, ["int"], "int")        // retain(ptr)
     emitType(bytes, ["int"], "none")       // release(ptr)
@@ -170,6 +184,7 @@ function functionTypes(module_: MinusModule): int[] {
         for param of function_.params { params.push(param.typeName) }
         emitType(bytes, params, function_.result)
     }
+    if constants.length > 0 { emitType(bytes, [], "none") }
     return bytes
 }
 
@@ -236,17 +251,23 @@ function emitRelease(module_: MinusModule): int[] {
     localGet(b, 1); i32(b, ANY_TAG); op(b, 70); if_(b)
     localGet(b, 0); load16Unsigned(b, 8); localSet(b, 2)
     localGet(b, 2); i32(b, 32); op(b, 79); if_(b)
-    localGet(b, 0); load32(b, 16); call(b, 2)
+    localGet(b, 0); load32(b, 16); call(b, runtimeFunctionIndex(module_, 2))
     end(b); end(b)
     for index of 0..<module_.classes.length {
         class_ := module_.classes[index]
         let hasReferences = false
         for field of class_.fields { if reference(module_, field.typeName) { hasReferences = true } }
-        if !hasReferences { continue }
+        if !hasReferences && class_.finalizer == "" { continue }
         localGet(b, 1); i32(b, 32 + index); op(b, 70); if_(b)
+        if class_.finalizer != "" {
+            // Keep the receiver alive while its normal function frame owns it.
+            localGet(b, 0); localGet(b, 0); load32(b, 4); i32(b, 1); op(b, 106); store32(b, 4)
+            localGet(b, 0); call(b, functionIndex(module_, class_.finalizer))
+            localGet(b, 0); localGet(b, 0); load32(b, 4); i32(b, 1); op(b, 107); store32(b, 4)
+        }
         for fieldIndex_ of 0..<class_.fields.length {
             if !reference(module_, class_.fields[fieldIndex_].typeName) { continue }
-            localGet(b, 0); load32(b, classFieldOffset(class_, fieldIndex_)); call(b, 2)
+            localGet(b, 0); load32(b, classFieldOffset(class_, fieldIndex_)); call(b, runtimeFunctionIndex(module_, 2))
         }
         end(b)
     }
@@ -260,6 +281,91 @@ function emitRelease(module_: MinusModule): int[] {
     return b
 }
 
+function arrayWidth(typeName: string): int {
+    if typeName == "bool" || typeName == "byte" || typeName == "char" { return 1 }
+    if typeName == "short" { return 2 }
+    if typeName == "long" || typeName == "double" { return 8 }
+    return 4
+}
+
+function arrayLoadCode(typeName: string): int {
+    if typeName == "bool" || typeName == "byte" || typeName == "char" { return 45 }
+    if typeName == "short" { return 46 }
+    if typeName == "long" { return 41 }
+    if typeName == "float" { return 42 }
+    if typeName == "double" { return 43 }
+    return 40
+}
+
+function arrayStoreCode(typeName: string): int {
+    if typeName == "bool" || typeName == "byte" || typeName == "char" { return 58 }
+    if typeName == "short" { return 59 }
+    if typeName == "long" { return 55 }
+    if typeName == "float" { return 56 }
+    if typeName == "double" { return 57 }
+    return 54
+}
+
+function arrayAddress(bytes: int[], values: MinusValue[], handle: string, index: string, typeName: string): none {
+    getValue(bytes, values, handle)
+    i32(bytes, 8); op(bytes, 106)
+    getValue(bytes, values, index)
+    width := arrayWidth(typeName)
+    if width == 2 { i32(bytes, 1); op(bytes, 116) }
+    if width == 4 { i32(bytes, 2); op(bytes, 116) }
+    if width == 8 { i32(bytes, 3); op(bytes, 116) }
+    op(bytes, 106)
+}
+
+function checkArrayBounds(bytes: int[], values: MinusValue[], handle: string, index: string): none {
+    getValue(bytes, values, handle); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DATA_TAG); op(bytes, 71); if_(bytes); op(bytes, 0); end(bytes)
+    getValue(bytes, values, index); i32(bytes, 0); op(bytes, 72); if_(bytes); op(bytes, 0); end(bytes)
+    getValue(bytes, values, index); getValue(bytes, values, handle); load32(bytes, 4); op(bytes, 78); if_(bytes); op(bytes, 0); end(bytes)
+}
+
+function emitArrayInstruction(bytes: int[], module_: MinusModule, values: MinusValue[], scratchIndex: int, instruction: MinusInstruction): none {
+    args := instruction.args
+    if instruction.op == "array-alloc" {
+        typeName := args[1]
+        width := arrayWidth(typeName)
+        getValue(bytes, values, args[0]); i32(bytes, 0); op(bytes, 72); if_(bytes); op(bytes, 0); end(bytes)
+        getValue(bytes, values, args[0]); i32(bytes, 1024 \ width); op(bytes, 74); if_(bytes); op(bytes, 0); end(bytes)
+        getValue(bytes, values, args[0]); i32(bytes, width); op(bytes, 108); localSet(bytes, scratchIndex)
+        localGet(bytes, scratchIndex); i32(bytes, 16); op(bytes, 75); if_(bytes)
+        localGet(bytes, scratchIndex); i32(bytes, 16); op(bytes, 107); i32(bytes, 15); op(bytes, 106); i32(bytes, 16); op(bytes, 110); i32(bytes, 16); op(bytes, 108); i32(bytes, 24); op(bytes, 106); localSet(bytes, scratchIndex)
+        op(bytes, 5); i32(bytes, 24); localSet(bytes, scratchIndex)
+        end(bytes)
+        localGet(bytes, scratchIndex); i32(bytes, ARRAY_DATA_TAG); call(bytes, runtimeFunctionIndex(module_, 0)); localSet(bytes, scratchIndex)
+        localGet(bytes, scratchIndex); getValue(bytes, values, args[0]); store32(bytes, 4)
+        localGet(bytes, scratchIndex); setResult(bytes, module_, values, instruction)
+        return
+    }
+    if instruction.op == "array-free" {
+        getValue(bytes, values, args[0]); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DATA_TAG); op(bytes, 71); if_(bytes); op(bytes, 0); end(bytes)
+        getValue(bytes, values, args[0]); load16Unsigned(bytes, 2); i32(bytes, MIN_BLOCK_SIZE); op(bytes, 107); i32(bytes, 4); op(bytes, 118); i32(bytes, 2); op(bytes, 116); localSet(bytes, scratchIndex)
+        getValue(bytes, values, args[0]); i32(bytes, 0); store16(bytes, 0)
+        getValue(bytes, values, args[0]); localGet(bytes, scratchIndex); load32(bytes, 0); store32(bytes, 4)
+        localGet(bytes, scratchIndex); getValue(bytes, values, args[0]); store32(bytes, 0)
+        return
+    }
+    if instruction.op == "array-length" {
+        getValue(bytes, values, args[0]); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DATA_TAG); op(bytes, 71); if_(bytes); op(bytes, 0); end(bytes)
+        getValue(bytes, values, args[0]); load32(bytes, 4); setResult(bytes, module_, values, instruction)
+        return
+    }
+    typeName := if instruction.op == "array-get" then instruction.result!.typeName else valueType(values, args[2])
+    checkArrayBounds(bytes, values, args[0], args[1])
+    if instruction.op == "array-get" {
+        arrayAddress(bytes, values, args[0], args[1], typeName)
+        op(bytes, arrayLoadCode(typeName)); unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "byte" || typeName == "bool" || typeName == "char" then 0 else 2); unsigned(bytes, 8)
+        setResult(bytes, module_, values, instruction)
+        return
+    }
+    arrayAddress(bytes, values, args[0], args[1], typeName)
+    getValue(bytes, values, args[2])
+    op(bytes, arrayStoreCode(typeName)); unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "byte" || typeName == "bool" || typeName == "char" then 0 else 2); unsigned(bytes, 8)
+}
+
 function body(bytes: int[], locals: int[], instructions: int[]): none {
     let result: int[] = []
     unsigned(result, locals.length)
@@ -270,36 +376,66 @@ function body(bytes: int[], locals: int[], instructions: int[]): none {
     append(bytes, result)
 }
 
-function moduleHeader(module_: MinusModule): int[] {
+function moduleHeader(module_: MinusModule, debugHeap: bool = false): int[] {
     let bytes: int[] = [0, 97, 115, 109, 1, 0, 0, 0]
+    constants := stringConstants(module_)
+    let hasStringInitializer = constants.length > 0
     section(bytes, 1, functionTypes(module_))
+    if module_.imports.length > 0 {
+        let imports: int[] = []
+        unsigned(imports, module_.imports.length)
+        for index of 0..<module_.imports.length {
+            import_ := module_.imports[index]
+            name(imports, import_.importModule)
+            name(imports, import_.importName)
+            op(imports, 0)
+            unsigned(imports, index)
+        }
+        section(bytes, 2, imports)
+    }
     let functions: int[] = []
-    unsigned(functions, module_.functions.length + 3)
-    for index of 0..<(module_.functions.length + 3) { unsigned(functions, index) }
+    unsigned(functions, module_.functions.length + 3 + if hasStringInitializer then 1 else 0)
+    for index of 0..<(module_.functions.length + 3) { unsigned(functions, module_.imports.length + index) }
+    if hasStringInitializer { unsigned(functions, module_.imports.length + module_.functions.length + 3) }
     section(bytes, 3, functions)
     let table: int[] = [1, 112, 0]
     unsigned(table, module_.functions.length + 3)
     section(bytes, 4, table)
     section(bytes, 5, [1, 0, 1]) // one memory, minimum one page
-    let globals: int[] = [1]
+    let globals: int[] = []
+    unsigned(globals, constants.length + 1)
     op(globals, 127); op(globals, 1); i32(globals, 1024); end(globals) // heap cursor
+    for _ of constants {
+        op(globals, 127); op(globals, 1); i32(globals, 0); end(globals)
+    }
     section(bytes, 6, globals)
     let exports: int[] = []
     let count = 0
     for function_ of module_.functions { if function_.exported { count += 1 } }
-    unsigned(exports, count)
+    unsigned(exports, count + 3 + if debugHeap then 1 else 0)
     for index of 0..<module_.functions.length {
         function_ := module_.functions[index]
         if !function_.exported { continue }
-        name(exports, function_.name)
+        name(exports, if function_.exportName == "" then function_.name else function_.exportName)
         op(exports, 0)
-        unsigned(exports, index + 3)
+        unsigned(exports, module_.imports.length + index + 3)
     }
-    if count > 0 { section(bytes, 7, exports) }
+    name(exports, "__doof_ffi_alloc"); op(exports, 0); unsigned(exports, runtimeFunctionIndex(module_, 0))
+    name(exports, "__doof_ffi_release"); op(exports, 0); unsigned(exports, runtimeFunctionIndex(module_, 2))
+    name(exports, "__doof_ffi_memory"); op(exports, 2); unsigned(exports, 0)
+    if debugHeap {
+        name(exports, "__doof_debug_heap_end"); op(exports, 3); unsigned(exports, 0)
+    }
+    section(bytes, 7, exports)
+    if hasStringInitializer {
+        let start: int[] = []
+        unsigned(start, module_.imports.length + module_.functions.length + 3)
+        section(bytes, 8, start)
+    }
     let elements: int[] = [1, 0]
     i32(elements, 0); end(elements)
     unsigned(elements, module_.functions.length + 3)
-    for index of 0..<(module_.functions.length + 3) { unsigned(elements, index) }
+    for index of 0..<(module_.functions.length + 3) { unsigned(elements, module_.imports.length + index) }
     section(bytes, 9, elements)
     return bytes
 }
@@ -317,14 +453,72 @@ function collectValues(function_: MinusFunction): MinusValue[] {
 function resultIndex(values: MinusValue[], instruction: MinusInstruction): int => valueIndex(values, instruction.result!.name)
 function getValue(bytes: int[], values: MinusValue[], name_: string): none { localGet(bytes, valueIndex(values, name_)) }
 
+function stringConstants(module_: MinusModule): string[] {
+    let result: string[] = []
+    for function_ of module_.functions {
+        for block_ of function_.blocks {
+            for instruction of block_.instructions {
+                if instruction.op == "string-const" && instruction.args.length == 1 && !result.contains(instruction.args[0]) {
+                    result.push(instruction.args[0])
+                }
+            }
+        }
+    }
+    return result
+}
+
+function stringConstantIndex(constants: string[], value: string): int {
+    for index of 0..<constants.length { if constants[index] == value { return index } }
+    panic("validated string constant missing from pool")
+}
+
+function arrayDataBlockSize(length: int): int {
+    let size = 24
+    if length > 16 { size = 24 + ((length - 16 + 15) \ 16) * 16 }
+    return size
+}
+
+function emitStringPoolInitializer(module_: MinusModule, constants: string[]): int[] {
+    let bytes: int[] = []
+    let charArray = classByName(module_, "__doof_array_char")
+    let stringClass = classByName(module_, "__doof_string")
+    let charDataField = fieldIndex(charArray, "data")
+    let stringCharsField = fieldIndex(stringClass, "chars")
+    for index of 0..<constants.length {
+        value := constants[index]
+        // Build the char[] backing block. Array-data blocks keep their length
+        // in the header and their elements immediately after the 8-byte header.
+        i32(bytes, arrayDataBlockSize(value.length)); i32(bytes, ARRAY_DATA_TAG); call(bytes, runtimeFunctionIndex(module_, 0)); localSet(bytes, 0)
+        localGet(bytes, 0); i32(bytes, value.length); store32(bytes, 4)
+        for charIndex of 0..<value.length {
+            localGet(bytes, 0); i32(bytes, int(value[charIndex])); store(bytes, "char", 8 + charIndex)
+        }
+
+        // The char[] wrapper takes ownership of the backing data block.
+        i32(bytes, classSize(charArray)); i32(bytes, tag(module_, charArray.name)); call(bytes, runtimeFunctionIndex(module_, 0)); localSet(bytes, 1)
+        localGet(bytes, 1); i32(bytes, 1); store32(bytes, 4)
+        localGet(bytes, 1); localGet(bytes, 0); store(bytes, "int", classFieldOffset(charArray, charDataField))
+
+        // Construct the string wrapper. Its chars field owns a retained ref;
+        // release the initializer's temporary wrapper ref after storing it.
+        i32(bytes, classSize(stringClass)); i32(bytes, tag(module_, stringClass.name)); call(bytes, runtimeFunctionIndex(module_, 0)); localSet(bytes, 2)
+        localGet(bytes, 2); i32(bytes, 1); store32(bytes, 4)
+        localGet(bytes, 1); call(bytes, runtimeFunctionIndex(module_, 1)); op(bytes, 26)
+        localGet(bytes, 2); localGet(bytes, 1); store(bytes, stringClass.fields[stringCharsField].typeName, classFieldOffset(stringClass, stringCharsField))
+        localGet(bytes, 2); globalSet(bytes, index + 1)
+        localGet(bytes, 1); call(bytes, runtimeFunctionIndex(module_, 2))
+    }
+    return bytes
+}
+
 function setResult(bytes: int[], module_: MinusModule, values: MinusValue[], instruction: MinusInstruction): none {
     index := resultIndex(values, instruction)
-    if reference(module_, instruction.result!.typeName) { localGet(bytes, index); call(bytes, 2) }
+    if reference(module_, instruction.result!.typeName) { localGet(bytes, index); call(bytes, runtimeFunctionIndex(module_, 2)) }
     localSet(bytes, index)
 }
 
 function retainTop(bytes: int[], module_: MinusModule, typeName: string): none {
-    if reference(module_, typeName) { call(bytes, 1) }
+    if reference(module_, typeName) { call(bytes, runtimeFunctionIndex(module_, 1)) }
 }
 
 function normalize(bytes: int[], typeName: string): none {
@@ -408,7 +602,7 @@ function emitNumericConversion(bytes: int[], source: string, target: string): no
 
 function emitReleaseLocals(bytes: int[], module_: MinusModule, values: MinusValue[]): none {
     for index of 0..<values.length {
-        if reference(module_, values[index].typeName) { localGet(bytes, index); call(bytes, 2) }
+        if reference(module_, values[index].typeName) { localGet(bytes, index); call(bytes, runtimeFunctionIndex(module_, 2)) }
     }
 }
 
@@ -420,7 +614,7 @@ function emitEdge(bytes: int[], module_: MinusModule, function_: MinusFunction, 
         retainTop(bytes, module_, valueType(values, arg))
     }
     for param of block_.params {
-        if reference(module_, param.typeName) { localGet(bytes, valueIndex(values, param.name)); call(bytes, 2) }
+        if reference(module_, param.typeName) { localGet(bytes, valueIndex(values, param.name)); call(bytes, runtimeFunctionIndex(module_, 2)) }
     }
     let index = block_.params.length - 1
     while index >= 0 { localSet(bytes, valueIndex(values, block_.params[index].name)); index -= 1 }
@@ -455,7 +649,7 @@ function emitDynamicField(bytes: int[], module_: MinusModule, values: MinusValue
         } else {
             fieldType := valueType(values, instruction.args[2])
             if reference(module_, fieldType) {
-                getValue(bytes, values, instruction.args[0]); load32(bytes, offset); call(bytes, 2)
+                getValue(bytes, values, instruction.args[0]); load32(bytes, offset); call(bytes, runtimeFunctionIndex(module_, 2))
             }
             if fieldType != "none" {
                 getValue(bytes, values, instruction.args[0]); getValue(bytes, values, instruction.args[2])
@@ -483,7 +677,7 @@ function emitField(bytes: int[], module_: MinusModule, values: MinusValue[], ins
         setResult(bytes, module_, values, instruction)
     } else {
         fieldType := valueType(values, instruction.args[2])
-        if reference(module_, fieldType) { getValue(bytes, values, instruction.args[0]); load32(bytes, offset); call(bytes, 2) }
+        if reference(module_, fieldType) { getValue(bytes, values, instruction.args[0]); load32(bytes, offset); call(bytes, runtimeFunctionIndex(module_, 2)) }
         if fieldType != "none" {
             getValue(bytes, values, instruction.args[0]); getValue(bytes, values, instruction.args[2])
             retainTop(bytes, module_, fieldType)
@@ -516,7 +710,7 @@ function emitCall(bytes: int[], module_: MinusModule, values: MinusValue[], scra
     let signatureIndex = -1
     for class_ of module_.classes {
         if !class_.interfaces.contains(ownerType) { continue }
-        methodIndex := functionIndex(module_, class_.name + "." + args[1])
+        methodIndex := tableFunctionIndex(module_, class_.name + "." + args[1])
         if signatureIndex < 0 { signatureIndex = methodIndex }
         getValue(bytes, values, args[0]); load16Unsigned(bytes, 0)
         i32(bytes, tag(module_, class_.name)); op(bytes, 70); if_(bytes)
@@ -536,7 +730,7 @@ function emitNew(bytes: int[], module_: MinusModule, values: MinusValue[], instr
     class_ := classByName(module_, instruction.args[0])
     i32(bytes, classSize(class_))
     i32(bytes, tag(module_, class_.name))
-    call(bytes, 0)
+    call(bytes, runtimeFunctionIndex(module_, 0))
     setResult(bytes, module_, values, instruction)
     for index of 0..<class_.fields.length {
         typeName := class_.fields[index].typeName
@@ -550,7 +744,7 @@ function emitNew(bytes: int[], module_: MinusModule, values: MinusValue[], instr
 
 function emitBox(bytes: int[], module_: MinusModule, values: MinusValue[], instruction: MinusInstruction): none {
     sourceType := valueType(values, instruction.args[0])
-    i32(bytes, 24); i32(bytes, ANY_TAG); call(bytes, 0)
+    i32(bytes, 24); i32(bytes, ANY_TAG); call(bytes, runtimeFunctionIndex(module_, 0))
     setResult(bytes, module_, values, instruction)
     localGet(bytes, resultIndex(values, instruction)); i32(bytes, tag(module_, sourceType)); store16(bytes, 8)
     if sourceType != "none" {
@@ -578,6 +772,14 @@ function emitTagOperation(bytes: int[], module_: MinusModule, values: MinusValue
 function emitInstruction(bytes: int[], module_: MinusModule, function_: MinusFunction, values: MinusValue[], pcIndex: int, scratchIndex: int, instruction: MinusInstruction): none {
     operation := instruction.op
     args := instruction.args
+    if operation == "panic" { op(bytes, 0); return }
+    if operation == "string-const" {
+        constants := stringConstants(module_)
+        globalGet(bytes, stringConstantIndex(constants, args[0]) + 1)
+        call(bytes, runtimeFunctionIndex(module_, 1))
+        setResult(bytes, module_, values, instruction)
+        return
+    }
     if operation == "const" { emitConstant(bytes, instruction); setResult(bytes, module_, values, instruction); return }
     if ["add", "sub", "mul", "div", "eq", "lt"].contains(operation) {
         getValue(bytes, values, args[0]); getValue(bytes, values, args[1])
@@ -600,6 +802,7 @@ function emitInstruction(bytes: int[], module_: MinusModule, function_: MinusFun
         return
     }
     if operation == "new" { emitNew(bytes, module_, values, instruction); return }
+    if ["array-alloc", "array-free", "array-length", "array-get", "array-set"].contains(operation) { emitArrayInstruction(bytes, module_, values, scratchIndex, instruction); return }
     if operation == "get" || operation == "set" { emitField(bytes, module_, values, instruction); return }
     if operation == "call" || operation == "call-method" { emitCall(bytes, module_, values, scratchIndex, instruction); return }
     if operation == "box" { emitBox(bytes, module_, values, instruction); return }
@@ -629,7 +832,7 @@ function emitUserFunction(module_: MinusModule, function_: MinusFunction): int[]
     let bytes: int[] = []
     for index of 0..<function_.params.length {
         typeName := function_.params[index].typeName
-        if reference(module_, typeName) { localGet(bytes, index); call(bytes, 1); localSet(bytes, index) }
+        if reference(module_, typeName) { localGet(bytes, index); call(bytes, runtimeFunctionIndex(module_, 1)); localSet(bytes, index) }
         if typeName == "byte" || typeName == "short" {
             localGet(bytes, index); normalize(bytes, typeName); localSet(bytes, index)
         }
@@ -637,12 +840,7 @@ function emitUserFunction(module_: MinusModule, function_: MinusFunction): int[]
             localGet(bytes, index); op(bytes, 69); op(bytes, 69); localSet(bytes, index)
         }
         if typeName == "none" { i32(bytes, 0); localSet(bytes, index) }
-        if typeName == "char" {
-            localGet(bytes, index); i32(bytes, 1114111); op(bytes, 75); if_(bytes); op(bytes, 0); end(bytes)
-            localGet(bytes, index); i32(bytes, 55296); op(bytes, 79)
-            localGet(bytes, index); i32(bytes, 57343); op(bytes, 77)
-            op(bytes, 113); if_(bytes); op(bytes, 0); end(bytes)
-        }
+        if typeName == "char" { localGet(bytes, index); i32(bytes, 255); op(bytes, 75); if_(bytes); op(bytes, 0); end(bytes) }
     }
     i32(bytes, 0); localSet(bytes, pcIndex)
     block(bytes); loop(bytes)
@@ -658,11 +856,12 @@ function emitUserFunction(module_: MinusModule, function_: MinusFunction): int[]
     return bytes
 }
 
-export function encodeDoofMinus(module_: MinusModule): Result<byte[], string> {
+export function encodeDoofMinus(module_: MinusModule, debugHeap: bool = false): Result<byte[], string> {
     try validateDoofMinus(module_)
-    let bytes = moduleHeader(module_)
+    let bytes = moduleHeader(module_, debugHeap)
+    constants := stringConstants(module_)
     let code: int[] = []
-    unsigned(code, module_.functions.length + 3)
+    unsigned(code, module_.functions.length + 3 + if constants.length > 0 then 1 else 0)
     body(code, [127, 127, 127, 127, 127, 127], emitAllocator())
     body(code, [], emitRetain())
     body(code, [127, 127, 127, 127], emitRelease(module_))
@@ -674,13 +873,14 @@ export function encodeDoofMinus(module_: MinusModule): Result<byte[], string> {
         locals.push(127) // indirect-call table index
         body(code, locals, emitUserFunction(module_, function_))
     }
+    if constants.length > 0 { body(code, [127, 127, 127], emitStringPoolInitializer(module_, constants)) }
     section(bytes, 10, code)
     let result: byte[] = []
     for value of bytes { result.push(byte(value)) }
     return Success(result)
 }
 
-export function compileDoofMinus(source: string): Result<byte[], string> {
+export function compileDoofMinus(source: string, debugHeap: bool = false): Result<byte[], string> {
     try module_ := parseDoofMinus(source)
-    return encodeDoofMinus(module_)
+    return encodeDoofMinus(module_, debugHeap)
 }

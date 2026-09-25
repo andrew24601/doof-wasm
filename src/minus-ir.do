@@ -4,6 +4,7 @@ export class MinusField {
     typeName: string
     mutable: bool = false
     line: int = 0
+    sourcePath: string = ""
 }
 
 export class MinusMethod {
@@ -11,13 +12,16 @@ export class MinusMethod {
     params: string[] = []
     result: string = "none"
     line: int = 0
+    sourcePath: string = ""
 }
 
 export class MinusClass {
     name: string
     interfaces: string[] = []
     fields: MinusField[] = []
+    let finalizer: string = ""
     line: int = 0
+    sourcePath: string = ""
 }
 
 export class MinusInterface {
@@ -25,6 +29,7 @@ export class MinusInterface {
     fields: MinusField[] = []
     methods: MinusMethod[] = []
     line: int = 0
+    sourcePath: string = ""
 }
 
 export class MinusValue {
@@ -37,6 +42,7 @@ export class MinusInstruction {
     result: MinusValue | none = none
     args: string[] = []
     line: int = 0
+    sourcePath: string = ""
 }
 
 export class MinusBlock {
@@ -44,19 +50,33 @@ export class MinusBlock {
     params: MinusValue[] = []
     instructions: MinusInstruction[] = []
     line: int = 0
+    sourcePath: string = ""
 }
 
 export class MinusFunction {
     name: string
     params: MinusValue[] = []
     result: string = "none"
-    exported: bool = false
+    let exported: bool = false
     blocks: MinusBlock[] = []
     line: int = 0
+    sourcePath: string = ""
+    let exportName: string = ""
+}
+
+export class MinusImport {
+    name: string
+    importModule: string = "doof"
+    importName: string
+    params: MinusValue[] = []
+    result: string = "none"
+    line: int = 0
+    sourcePath: string = ""
 }
 
 export class MinusModule {
     classes: MinusClass[] = []
     interfaces: MinusInterface[] = []
+    imports: MinusImport[] = []
     functions: MinusFunction[] = []
 }

@@ -177,6 +177,11 @@ export function parseDoofMinus(source: string): Result<MinusModule, string> {
             return Failure(diagnostic(line, "invalid declaration"))
         }
         if currentClass != none || currentInterface != none {
+            if currentClass != none && parts[0] == "destructor" {
+                if (parts.length != 2 && parts.length != 4) || (parts.length == 4 && parts[2] != ".") || currentClass!.finalizer != "" { return Failure(diagnostic(line, "destructor needs one function name")) }
+                currentClass!.finalizer = if parts.length == 2 then parts[1] else parts[1] + "." + parts[3]
+                continue
+            }
             if parts[0] == "field" {
                 let index = 1
                 let mutable = false

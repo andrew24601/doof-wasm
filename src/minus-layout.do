@@ -11,7 +11,8 @@ export function fieldWidth(typeName: string): int {
     if typeName == "bool" || typeName == "byte" { return 1 }
     if typeName == "short" { return 2 }
     if typeName == "long" || typeName == "double" { return 8 }
-    return 4 // char, int, float, class, interface, any
+    if typeName == "char" { return 1 }
+    return 4 // int, float, class, interface, any
 }
 
 function align(value: int, width: int): int {

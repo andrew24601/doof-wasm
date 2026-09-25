@@ -10,7 +10,7 @@ The built-in types are `none`, `bool`, `char`, `byte`, `short`, `int`, `long`, `
 | --- | --- | --- |
 | `none` | Sole value `none` | No function result; i32 zero where stored or passed |
 | `bool` | `true` or `false` | i32, zero or one |
-| `char` | Unicode scalar value, written as a decimal code point | i32 |
+| `char` | Unsigned single-byte character value (0–255) | i32 |
 | `byte` | Unsigned 8-bit integer | i32 |
 | `short` | Signed 16-bit integer | i32 |
 | `int` | Signed 32-bit integer | i32 |
@@ -19,7 +19,7 @@ The built-in types are `none`, `bool`, `char`, `byte`, `short`, `int`, `long`, `
 | `double` | IEEE 754 binary64 | f64 |
 | Class, interface, `any` | Owned heap reference | i32 pointer |
 
-Class references are non-null. Use `any` containing `none` when absence must be represented. Integer arithmetic wraps to its type's width; integer division traps on zero. Floating arithmetic follows Wasm. Explicit numeric conversions use Wasm conversion instructions: narrowing integer conversions wrap, while invalid floating-to-integer conversions trap. `char` constants must be Unicode scalar values, excluding surrogates.
+Class references are non-null. Use `any` containing `none` when absence must be represented. Integer arithmetic wraps to its type's width; integer division traps on zero. Floating arithmetic follows Wasm. Explicit numeric conversions use Wasm conversion instructions: narrowing integer conversions wrap, while invalid floating-to-integer conversions trap. `char` constants must fit in one byte.
 
 ## Declarations
 
@@ -40,13 +40,31 @@ return %v
 end
 ```
 
+A class may name a private destructor function. It takes the class receiver and
+returns `none`; the runtime calls it once when the receiver's reference count
+reaches zero, before releasing the class's reference fields.
+
+```text
+class Owner
+destructor Owner.destroy
+field let handle:int
+end
+
+func Owner.destroy(%self:Owner) -> none
+block entry
+%handle:int = get %self.handle
+array-free %handle
+return
+end
+```
+
 `field name:type` is immutable after construction; `field let name:type` is writable. Fields are constructed in declaration order. An interface may declare fields and methods. An implementation must explicitly list the interface and supply compatible fields and a function named `Class.method` with the class receiver first. Method parameters and results must match the interface declaration exactly. Classes have no inheritance or generic parameters.
 
-Functions use `func name(%arg:type, ...) -> type`; `export func` exposes a function to the Wasm host. Exported parameters and results must be primitive. Class methods are ordinary functions named `Class.method` with a receiver as their first parameter.
+Functions use `func name(%arg:type, ...) -> type`; `export func` exposes a function to the Wasm host. Exported parameters and results may be primitive or the compiler's `__doof_string` class; a raw Wasm string value is a heap pointer and needs a matching host bridge. Other class, interface, and `any` values cannot cross the export boundary. Class methods are ordinary functions named `Class.method` with a receiver as their first parameter.
 
 ## Blocks and instructions
 
-Each function starts with an entry block without parameters. A block ends in exactly one `return`, `jump`, or `branch`. Values are defined once per function. A block can read function parameters and its own parameters and results. Values crossing an edge must be supplied as block arguments.
+Each function starts with an entry block without parameters. A block ends in exactly one `return`, `jump`, `branch`, or `panic`. Values are defined once per function. A block can read function parameters and its own parameters and results. Values crossing an edge must be supplied as block arguments.
 
 ```text
 export func count(%limit:int) -> int
@@ -69,12 +87,17 @@ Supported instructions are:
 
 | Form | Result or effect |
 | --- | --- |
-| `%r:T = const literal` | Primitive constant; `char` uses a decimal code point |
+| `%r:T = const literal` | Primitive constant; `char` uses a decimal byte value |
 | `%r:T = add/sub/mul/div %a, %b` | Matching numeric operands and result |
 | `%r:bool = eq/lt %a, %b` | Matching numeric operands; `eq` also accepts `bool`, `char`, and `none`; `lt` also accepts `char` |
 | `%r:T = convert %a` | Explicit conversion between numeric types |
 | `%r:T = copy %a` | Copy a value; retains references |
 | `%r:C = new C(%a, ...)` | Allocate a class; arguments follow field order |
+| `%r:int = array-alloc %length, T` | Allocate a primitive array-data block with `length` elements of type `T` |
+| `array-free %handle` | Return an array-data block to the allocator |
+| `%r:int = array-length %handle` | Read the array element count |
+| `%r:T = array-get %handle, %index` | Bounds-checked read for primitive type `T` |
+| `array-set %handle, %index, %value` | Bounds-checked primitive write |
 | `%r:T = get %object.field` | Read a class or interface field |
 | `set %object.field = %value` | Replace a mutable field |
 | `%r:T = call function(%a, ...)` | Direct function call |
@@ -86,7 +109,14 @@ Supported instructions are:
 | `jump block(%a, ...)` | Transfer values to block parameters |
 | `branch %bool yes(%a, ...) no(%b, ...)` | Conditional transfer |
 | `return` / `return %value` | Return `none` / a typed value |
+| `panic` | Trap execution with the Wasm `unreachable` instruction |
+
+Array element types are `bool`, `char`, `byte`, `short`, `int`, `long`, `float`,
+and `double`. Array lengths must be nonnegative, and allocated storage is
+limited to 1024 payload bytes. Negative lengths, oversized allocations, invalid
+handles, and out-of-range indexes trap. These operations are compiler-lowering
+primitives; source Doof code reaches them through generated wrapper classes.
 
 Interfaces and `any` cannot be boxed directly; box the concrete class value. A failed `cast` traps. Other invalid runtime operations, such as division by zero, follow Wasm trap behavior. The compiler rejects malformed types, calls, interface implementations, and control-flow edges before emission.
 
-Strings, arrays, closures, weak references, inheritance, generics, and source-level sum types are outside this language. A source compiler can represent a union as `any`, box each member, and use `is` and `cast` to inspect it.
+Strings, first-class arrays, closures, weak references, inheritance, generics, and source-level sum types are outside this language. Array-data operations are internal lowering instructions; source Doof can access arrays only through compiler-generated wrappers. A source compiler can represent a union as `any`, box each member, and use `is` and `cast` to inspect it.
