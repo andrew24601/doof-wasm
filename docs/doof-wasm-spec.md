@@ -42,8 +42,12 @@ the full Doof compiler.
 - Local `let`, `readonly`, and inferred immutable bindings; returns; `if`,
   `if`/`else`, and `else if` branches that rejoin; union `case` statements with
   type captures, `none`, and wildcard arms; and `while` loops.
+- Function values lower to generated `__closure_<result>_<arg>...` interfaces
+  and one class per lambda. Lambdas can capture immutable locals by copying
+  them into immutable fields; calls dispatch through the generated `invoke`
+  method. Capturing mutable `let` locals is not supported yet.
 - Arithmetic `+`, `-`, `*`, `/`; comparisons `==`, `!=`, `<`, `>`; unary `-`
-  and `!`; direct, instance, and named calls; field reads and writes;
+  and `!`; direct, instance, named, and closure calls; field reads and writes;
   positional and named class construction; class-to-interface assignment;
   numeric conversion; and `any`
   boxing/casts. Union members are boxed into `any`; comparisons with `none`
@@ -58,7 +62,7 @@ or loop edges are passed as block arguments.
 
 Imports and multiple source files, generics, string-backed enums, arrays whose
 element type is unsupported by doof--, labeled loops, `break`, `continue`, while-else
-clauses, static members, weak references, closures, case expressions,
+clauses, static members, weak references, mutable closure captures, case expressions,
 value/range patterns, and multiple patterns per case arm,
 async code, compound assignments, nested lexical blocks, and other source expressions. The doof-- backend
 already supports more control flow and runtime operations; the source lowering

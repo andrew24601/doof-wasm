@@ -96,6 +96,59 @@ export function testLowersAndExecutesResultArmsAsDoofMinusClasses(): none {
   runWasm(bytes, "result-arms", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.successValue()!==40||e.failureValue()!==2||e.main()!==42)throw new Error("Result arm lowering returned the wrong payload")`)
 }
 
+export function testLowersAndExecutesClosureWithImmutableCapture(): none {
+  source := "function makeAdder(base: int): (value: int): int => (value: int): int => base + value\n" +
+    "export function main(): int { add := makeAdder(40)\nreturn add(2) }"
+  lowered := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  case lowered {
+    success: Success<MinusModule> -> {
+      let foundInterface = false
+      let foundInvoke = false
+      for interface_ of success.value.interfaces { if interface_.name == "__closure_int_int" { foundInterface = true } }
+      for function_ of success.value.functions { if function_.name.endsWith(".invoke") { foundInvoke = true } }
+      Assert.isTrue(foundInterface)
+      Assert.isTrue(foundInvoke)
+    }
+    failure: Failure<string> -> { panic(failure.error) }
+  }
+  bytes := try! compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  runWasm(bytes, "closure-capture", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.main()!==42)throw new Error("Captured closure returned the wrong value")`)
+}
+
+export function testLowersAndExecutesEscapingClosureWithReferenceCapture(): none {
+  source := "class Box { value: int }\n" +
+    "function makeReader(): (): int { box := Box { value: 42 }\nreturn (): int => box.value }\n" +
+    "export function main(): int { read := makeReader()\nreturn read() }"
+  bytes := try! compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  runWasm(bytes, "closure-reference-capture", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.main()!==42)throw new Error("Escaping closure lost its captured object")`)
+}
+
+export function testLowersTwoArgumentStringClosureSignature(): none {
+  source := "function makeText(text: string): (left: int, right: int): string => (left: int, right: int): string => text\n" +
+    "export function main(): int { callback := makeText(\"ready\")\nresult := callback(1, 2)\nreturn result.length }"
+  lowered := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  case lowered {
+    success: Success<MinusModule> -> {
+      let found = false
+      for interface_ of success.value.interfaces { if interface_.name == "__closure_string_int_int" { found = true } }
+      Assert.isTrue(found)
+    }
+    failure: Failure<string> -> { panic(failure.error) }
+  }
+  bytes := try! compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  runWasm(bytes, "closure-signature", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.main()!==5)throw new Error("Two argument string closure returned the wrong value")`)
+}
+
+export function testRejectsMutableClosureCapture(): none {
+  result := lowerDoofWasmSources([
+    SourceFile { path: "/main.do", source: "function make(): (): int { let value = 1\nreturn (): int => value }" },
+  ], "/main.do")
+  case result {
+    failure: Failure<string> -> { Assert.stringContains(failure.error, "capturing mutable local value") }
+    _ -> { Assert.fail("Expected mutable closure capture to be rejected") }
+  }
+}
+
 export function testLowersImportedIntegerEnums(): none {
   result := lowerDoofWasmSources([
     SourceFile { path: "/main.do", source: "import { Kind, getKind } from \"./kinds\"\nexport function main(): int => getKind().value" },

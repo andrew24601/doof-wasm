@@ -31,7 +31,11 @@ function merge(target: MinusModule, source: MinusModule): none {
     for existing of target.classes { if existing.name == class_.name { found = true } }
     if !found { target.classes.push(class_) }
   }
-  for interface_ of source.interfaces { target.interfaces.push(interface_) }
+  for interface_ of source.interfaces {
+    let found = false
+    for existing of target.interfaces { if existing.name == interface_.name { found = true } }
+    if !found { target.interfaces.push(interface_) }
+  }
   for import_ of source.imports { target.imports.push(import_) }
   for function_ of source.functions {
     let found = false
