@@ -831,6 +831,9 @@ function lowerCall(context: FunctionLowering, call: CallExpression, expression: 
       return result(context, "call", concatValues([target], args), typeFromValue(expression))
     }
     callee: MemberExpression -> {
+      if typeFromValue(callee.object) == STRING_CLASS && callee.property == "substring" && args.length == 1 {
+        args.push(result(context, "call-method", [receiver, "length"], "int"))
+      }
       return result(context, "call-method", concatValues([receiver, callee.property], args), typeFromValue(expression))
     }
     _ -> { context.failed = "call target is not supported by doof-wasm"; return "" }

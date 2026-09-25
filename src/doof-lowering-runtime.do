@@ -255,7 +255,8 @@ export function injectStringImplementation(module_: MinusModule): none {
       MinusBlock { name: "greater", instructions: [MinusInstruction { op: "const", result: MinusValue { name: "%greaterResult", typeName: "int" }, args: ["1"] }, MinusInstruction { op: "return", args: ["%greaterResult"] }] },
     ],
   }) }
-  if moduleUsesStringMethod(module_, "indexOf") { module_.functions.push(MinusFunction {
+  let usesIndexOf = moduleUsesStringMethod(module_, "indexOf") || moduleUsesStringMethod(module_, "startsWith") || moduleUsesStringMethod(module_, "contains")
+  if usesIndexOf { module_.functions.push(MinusFunction {
     name: STRING_CLASS + ".indexOf",
     params: [MinusValue { name: "%self", typeName: STRING_CLASS }, MinusValue { name: "%needle", typeName: STRING_CLASS }],
     result: "int",
@@ -300,5 +301,89 @@ export function injectStringImplementation(module_: MinusModule): none {
       MinusBlock { name: "missing", instructions: [MinusInstruction { op: "const", result: MinusValue { name: "%notFound", typeName: "int" }, args: ["-1"] }, MinusInstruction { op: "return", args: ["%notFound"] }] },
     ],
   }) }
+  for methodName of ["startsWith", "contains"] {
+    if !moduleUsesStringMethod(module_, methodName) { continue }
+    let resultValue = if methodName == "startsWith" then "%isPrefix" else "%isPresent"
+    module_.functions.push(MinusFunction {
+      name: STRING_CLASS + "." + methodName,
+      params: [MinusValue { name: "%self", typeName: STRING_CLASS }, MinusValue { name: "%needle", typeName: STRING_CLASS }],
+      result: "bool",
+      blocks: [MinusBlock { name: "entry", instructions: [
+        MinusInstruction { op: "call-method", result: MinusValue { name: "%position", typeName: "int" }, args: ["%self", "indexOf", "%needle"] },
+        MinusInstruction { op: "const", result: MinusValue { name: "%expected", typeName: "int" }, args: [if methodName == "startsWith" then "0" else "-1"] },
+        MinusInstruction { op: if methodName == "startsWith" then "eq" else "lt", result: MinusValue { name: resultValue, typeName: "bool" }, args: if methodName == "startsWith" then ["%position", "%expected"] else ["%expected", "%position"] },
+        MinusInstruction { op: "return", args: [resultValue] },
+      ] }],
+    })
+  }
+  if moduleUsesStringMethod(module_, "endsWith") { module_.functions.push(MinusFunction {
+    name: STRING_CLASS + ".endsWith",
+    params: [MinusValue { name: "%self", typeName: STRING_CLASS }, MinusValue { name: "%suffix", typeName: STRING_CLASS }],
+    result: "bool",
+    blocks: [
+      MinusBlock { name: "entry", instructions: [
+        MinusInstruction { op: "get", result: MinusValue { name: "%chars", typeName: CHAR_ARRAY_CLASS }, args: ["%self", "chars"] },
+        MinusInstruction { op: "get", result: MinusValue { name: "%suffixChars", typeName: CHAR_ARRAY_CLASS }, args: ["%suffix", "chars"] },
+        MinusInstruction { op: "call-method", result: MinusValue { name: "%length", typeName: "int" }, args: ["%chars", "length"] },
+        MinusInstruction { op: "call-method", result: MinusValue { name: "%suffixLength", typeName: "int" }, args: ["%suffixChars", "length"] },
+        MinusInstruction { op: "lt", result: MinusValue { name: "%tooLong", typeName: "bool" }, args: ["%length", "%suffixLength"] },
+        MinusInstruction { op: "branch", args: ["%tooLong", "no", "|", "begin"] },
+      ] },
+      MinusBlock { name: "begin", instructions: [
+        MinusInstruction { op: "sub", result: MinusValue { name: "%offset", typeName: "int" }, args: ["%length", "%suffixLength"] },
+        MinusInstruction { op: "const", result: MinusValue { name: "%zero", typeName: "int" }, args: ["0"] },
+        MinusInstruction { op: "jump", args: ["loop", "%zero"] },
+      ] },
+      MinusBlock { name: "loop", params: [MinusValue { name: "%index", typeName: "int" }], instructions: [
+        MinusInstruction { op: "lt", result: MinusValue { name: "%more", typeName: "bool" }, args: ["%index", "%suffixLength"] },
+        MinusInstruction { op: "branch", args: ["%more", "check", "%index", "|", "yes"] },
+      ] },
+      MinusBlock { name: "check", params: [MinusValue { name: "%index2", typeName: "int" }], instructions: [
+        MinusInstruction { op: "add", result: MinusValue { name: "%at", typeName: "int" }, args: ["%offset", "%index2"] },
+        MinusInstruction { op: "call-method", result: MinusValue { name: "%actual", typeName: "char" }, args: ["%chars", "get", "%at"] },
+        MinusInstruction { op: "call-method", result: MinusValue { name: "%expected", typeName: "char" }, args: ["%suffixChars", "get", "%index2"] },
+        MinusInstruction { op: "eq", result: MinusValue { name: "%same", typeName: "bool" }, args: ["%actual", "%expected"] },
+        MinusInstruction { op: "branch", args: ["%same", "advance", "%index2", "|", "no"] },
+      ] },
+      MinusBlock { name: "advance", params: [MinusValue { name: "%index3", typeName: "int" }], instructions: [
+        MinusInstruction { op: "const", result: MinusValue { name: "%one", typeName: "int" }, args: ["1"] },
+        MinusInstruction { op: "add", result: MinusValue { name: "%next", typeName: "int" }, args: ["%index3", "%one"] },
+        MinusInstruction { op: "jump", args: ["loop", "%next"] },
+      ] },
+      MinusBlock { name: "yes", instructions: [MinusInstruction { op: "const", result: MinusValue { name: "%true", typeName: "bool" }, args: ["true"] }, MinusInstruction { op: "return", args: ["%true"] }] },
+      MinusBlock { name: "no", instructions: [MinusInstruction { op: "const", result: MinusValue { name: "%false", typeName: "bool" }, args: ["false"] }, MinusInstruction { op: "return", args: ["%false"] }] },
+    ],
+  }) }
+  if moduleUsesStringMethod(module_, "substring") { module_.functions.push(MinusFunction {
+    name: STRING_CLASS + ".substring",
+    params: [MinusValue { name: "%self", typeName: STRING_CLASS }, MinusValue { name: "%start", typeName: "int" }, MinusValue { name: "%end", typeName: "int" }],
+    result: STRING_CLASS,
+    blocks: [
+      MinusBlock { name: "entry", instructions: [
+        MinusInstruction { op: "get", result: MinusValue { name: "%chars", typeName: CHAR_ARRAY_CLASS }, args: ["%self", "chars"] },
+        MinusInstruction { op: "call-method", result: MinusValue { name: "%length", typeName: "int" }, args: ["%chars", "length"] },
+        MinusInstruction { op: "sub", result: MinusValue { name: "%sliceLength", typeName: "int" }, args: ["%end", "%start"] },
+        MinusInstruction { op: "array-alloc", result: MinusValue { name: "%data", typeName: "int" }, args: ["%sliceLength", "char"] },
+        MinusInstruction { op: "const", result: MinusValue { name: "%zero", typeName: "int" }, args: ["0"] },
+        MinusInstruction { op: "jump", args: ["loop", "%zero"] },
+      ] },
+      MinusBlock { name: "loop", params: [MinusValue { name: "%index", typeName: "int" }], instructions: [
+        MinusInstruction { op: "lt", result: MinusValue { name: "%more", typeName: "bool" }, args: ["%index", "%sliceLength"] },
+        MinusInstruction { op: "branch", args: ["%more", "copy", "%index", "|", "finish"] },
+      ] },
+      MinusBlock { name: "copy", params: [MinusValue { name: "%index2", typeName: "int" }], instructions: [
+        MinusInstruction { op: "add", result: MinusValue { name: "%sourceIndex", typeName: "int" }, args: ["%start", "%index2"] },
+        MinusInstruction { op: "call-method", result: MinusValue { name: "%character", typeName: "char" }, args: ["%chars", "get", "%sourceIndex"] },
+        MinusInstruction { op: "array-set", args: ["%data", "%index2", "%character"] },
+        MinusInstruction { op: "const", result: MinusValue { name: "%one", typeName: "int" }, args: ["1"] },
+        MinusInstruction { op: "add", result: MinusValue { name: "%next", typeName: "int" }, args: ["%index2", "%one"] },
+        MinusInstruction { op: "jump", args: ["loop", "%next"] },
+      ] },
+      MinusBlock { name: "finish", instructions: [
+        MinusInstruction { op: "new", result: MinusValue { name: "%resultChars", typeName: CHAR_ARRAY_CLASS }, args: [CHAR_ARRAY_CLASS, "%data"] },
+        MinusInstruction { op: "new", result: MinusValue { name: "%result", typeName: STRING_CLASS }, args: [STRING_CLASS, "%resultChars"] },
+        MinusInstruction { op: "return", args: ["%result"] },
+      ] },
+    ],
+  }) }
 }
-

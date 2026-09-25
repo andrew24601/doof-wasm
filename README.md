@@ -21,8 +21,9 @@ a shared mutable cell so writes from either side remain visible. The CLI resolve
   payload bytes. Basic strings are represented by an injected string class over a
   read-only `char[]` wrapper. Distinct string literals are built once when the
   Wasm module starts and shared; `.length`, indexed character reads,
-  content-based comparison operators, `.compare(other)`, and
-  `.indexOf(search)` are supported. String interpolation and other
+  content-based comparison operators, `.compare(other)`, `.indexOf(search)`,
+  `.contains(search)`, `.startsWith(prefix)`, `.endsWith(suffix)`, and
+  `.substring(start[, end])` are supported. String interpolation and other
   string methods are not supported yet. Other collection values are not
   supported by lowering yet.
 Generics, string-backed enums, and loop labels, `break`, or `continue` are not supported yet.
