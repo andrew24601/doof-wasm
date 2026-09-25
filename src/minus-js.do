@@ -63,6 +63,8 @@ function importMetadata(import_: MinusImport): string {
 export function renderDoofJs(module_: MinusModule, debugHeap: bool = false): string {
     let classes: string[] = []
     for index of 0..<module_.classes.length { classes.push(classMetadata(module_.classes[index], 32 + index)) }
+    let enums: string[] = []
+    for index of 0..<module_.enums.length { enums.push("{tag:" + string(32 + module_.classes.length + index) + ",name:" + quoteJson(module_.enums[index].name) + "}") }
     let metadata = "["
     for index of 0..<classes.length {
         if index > 0 { metadata = metadata + "," }
@@ -90,6 +92,13 @@ export function renderDoofJs(module_: MinusModule, debugHeap: bool = false): str
     result = result + "const classes = " + metadata + ";\n"
     result = result + "const classesByTag = new Map(classes.map(type => [type.tag, type]));\n"
     result = result + "const classesByName = new Map(classes.map(type => [type.name, type]));\n"
+    let enumMetadata = "["
+    for index of 0..<enums.length {
+        if index > 0 { enumMetadata = enumMetadata + "," }
+        enumMetadata = enumMetadata + enums[index]
+    }
+    enumMetadata = enumMetadata + "]"
+    result = result + "const enumsByTag = new Map(" + enumMetadata + ".map(type => [type.tag, type]));\n"
     result = result + "const exportedFunctions = " + functionList + ";\n"
     result = result + "const importedFunctions = " + importsList + ";\n"
     result = result + "function createDoofModule(instance) {\n"
@@ -136,7 +145,7 @@ export function renderDoofJs(module_: MinusModule, debugHeap: bool = false): str
     result = result + "    if (size < 4 || address + size > end) throw new Error('invalid heap block header at ' + address);\n"
     result = result + "    if (tag === 0) return {address, size, kind:'free', nextFree:v.getUint32(address + 4, true)};\n"
     result = result + "    if (tag === 30) { const length = v.getUint32(address + 4, true); return {address, size, kind:'array-data', length, values:Array.from(new Uint8Array(memory.buffer, address + 8, Math.min(length, Math.max(0, size - 8))))}; }\n"
-    result = result + "    if (tag === 31) { const valueTag = v.getUint16(address + 8, true); const name = primitiveTags[valueTag] || classesByTag.get(valueTag)?.name || ('tag-' + valueTag); const value = valueTag === 0 ? null : readValue(name, address + 16); return {address, size, kind:'any', refCount:v.getUint32(address + 4, true), valueTag, valueType:name, value}; }\n"
+    result = result + "    if (tag === 31) { const valueTag = v.getUint16(address + 8, true); const name = primitiveTags[valueTag] || classesByTag.get(valueTag)?.name || enumsByTag.get(valueTag)?.name || ('tag-' + valueTag); const value = valueTag === 0 ? null : readValue(name, address + 16); return {address, size, kind:'any', refCount:v.getUint32(address + 4, true), valueTag, valueType:name, value}; }\n"
     result = result + "    const type = classesByTag.get(tag);\n    if (!type) return {address, size, kind:'unknown', tag};\n"
     result = result + "    const fields = Object.create(null);\n    for (const field of type.fields) fields[field.name] = field.type === 'none' ? null : readValue(field.type, address + field.offset);\n"
     result = result + "    const object = {address, size, kind:type.kind, type:type.name, refCount:v.getUint32(address + 4, true), fields};\n"

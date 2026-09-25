@@ -76,14 +76,27 @@ export function testCompilesImportedFunctionGraph(): none {
   }
 }
 
-export function testLoweringFailuresRetainImportedSourcePath(): none {
+export function testLowersImportedIntegerEnums(): none {
   result := lowerDoofWasmSources([
-    SourceFile { path: "/main.do", source: "import { unsupported } from \"./bad\"\nfunction main(): int => unsupported()" },
-    SourceFile { path: "/bad.do", source: "export enum Unsupported { One }\nexport function unsupported(): int => 1" },
+    SourceFile { path: "/main.do", source: "import { Kind, getKind } from \"./kinds\"\nexport function main(): int => getKind().value" },
+    SourceFile { path: "/kinds.do", source: "export enum Kind { First = 2, Last = 9 }\nexport function getKind(): Kind => Kind.Last\nexport function isKind(value: int | Kind | none): bool { case value { _: Kind -> { return true }, _: int -> { return false }, none -> { return false } } }" },
   ], "/main.do")
   case result {
-    success: Success<MinusModule> -> { panic("unsupported imported enum was accepted") }
-    failure: Failure<string> -> { Assert.stringContains(failure.error, "/bad.do:") }
+    success: Success<MinusModule> -> {
+      Assert.equal(success.value.enums.length, 1)
+      let found = false
+      for function_ of success.value.functions {
+        if function_.sourcePath == "/kinds.do" {
+          for block of function_.blocks {
+            for instruction of block.instructions {
+              if instruction.op == "const" && instruction.args[0] == "9" { found = true }
+            }
+          }
+        }
+      }
+      Assert.isTrue(found)
+    }
+    failure: Failure<string> -> { panic(failure.error) }
   }
 }
 

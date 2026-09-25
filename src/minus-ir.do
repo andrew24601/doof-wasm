@@ -32,6 +32,12 @@ export class MinusInterface {
     sourcePath: string = ""
 }
 
+export class MinusEnum {
+    name: string
+    line: int = 0
+    sourcePath: string = ""
+}
+
 export class MinusValue {
     name: string
     typeName: string
@@ -77,6 +83,7 @@ export class MinusImport {
 export class MinusModule {
     classes: MinusClass[] = []
     interfaces: MinusInterface[] = []
+    enums: MinusEnum[] = []
     imports: MinusImport[] = []
     functions: MinusFunction[] = []
 }

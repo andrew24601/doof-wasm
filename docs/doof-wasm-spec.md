@@ -15,9 +15,9 @@ the full Doof compiler.
   explicit interface implementations.
 - Interfaces with fields and method signatures.
 - `none`, `bool`, `char`, `byte`, `short`, `int`, `long`, `float`, `double`,
-  `string`,
-  classes, interfaces, `SerialValue`, and union types (lowered to doof--
-  `any`), including aliases that resolve to supported types.
+  `string`, integer-backed enums, classes, interfaces, `SerialValue`, and union
+  types (lowered to doof-- `any`), including aliases that resolve to supported
+  types. Enum tags remain distinct from integer tags inside `any` unions.
 - Mutable and read-only `byte[]` and `char[]` values, including literals,
   `.length`, indexed reads, and indexed writes on mutable arrays. Array literals
   are limited to 1024 elements. Other collection types remain unsupported by
@@ -49,9 +49,9 @@ or loop edges are passed as block arguments.
 
 ## Not supported yet
 
-Imports and multiple source files, generics, arrays other than `byte[]` and `char[]`, enums, labeled
-loops, `break`, `continue`, while-else clauses, static
-members, weak references, closures, case expressions,
+Imports and multiple source files, generics, string-backed enums, arrays other
+than `byte[]` and `char[]`, labeled loops, `break`, `continue`, while-else
+clauses, static members, weak references, closures, case expressions,
 value/range patterns, and multiple patterns per case arm,
 async code, compound assignments, nested lexical blocks, and other source expressions. The doof-- backend
 already supports more control flow and runtime operations; the source lowering

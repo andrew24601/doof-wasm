@@ -1,4 +1,4 @@
-import { MinusBlock, MinusClass, MinusField, MinusFunction, MinusInstruction, MinusInterface, MinusMethod, MinusModule, MinusValue } from "./minus-ir"
+import { MinusBlock, MinusClass, MinusEnum, MinusField, MinusFunction, MinusInstruction, MinusInterface, MinusMethod, MinusModule, MinusValue } from "./minus-ir"
 
 function tokens(line: string): string[] {
     let result: string[] = []
@@ -125,6 +125,7 @@ export function parseDoofMinus(source: string): Result<MinusModule, string> {
     let module_ = MinusModule {}
     let currentClass: MinusClass | none = none
     let currentInterface: MinusInterface | none = none
+    let currentEnum: MinusEnum | none = none
     let currentFunction: MinusFunction | none = none
     let currentBlock: MinusBlock | none = none
     lines := source.split("\n")
@@ -133,12 +134,12 @@ export function parseDoofMinus(source: string): Result<MinusModule, string> {
         parts := tokens(lines[offset])
         if parts.length == 0 { continue }
         if parts[0] == "end" {
-            if parts.length != 1 || (currentClass == none && currentInterface == none && currentFunction == none) { return Failure(diagnostic(line, "unexpected end")) }
+            if parts.length != 1 || (currentClass == none && currentInterface == none && currentEnum == none && currentFunction == none) { return Failure(diagnostic(line, "unexpected end")) }
             if currentFunction != none && currentFunction!.blocks.length == 0 { return Failure(diagnostic(line, "function needs a block")) }
-            currentClass = none; currentInterface = none; currentFunction = none; currentBlock = none
+            currentClass = none; currentInterface = none; currentEnum = none; currentFunction = none; currentBlock = none
             continue
         }
-        if currentClass == none && currentInterface == none && currentFunction == none {
+        if currentClass == none && currentInterface == none && currentEnum == none && currentFunction == none {
             if parts[0] == "class" {
                 if parts.length < 2 { return Failure(diagnostic(line, "class needs a name")) }
                 let interfaces: string[] = []
@@ -155,6 +156,12 @@ export function parseDoofMinus(source: string): Result<MinusModule, string> {
                 if parts.length != 2 { return Failure(diagnostic(line, "interface needs a name")) }
                 currentInterface = MinusInterface { name: parts[1], line }
                 module_.interfaces.push(currentInterface!)
+                continue
+            }
+            if parts[0] == "enum" {
+                if parts.length != 2 { return Failure(diagnostic(line, "enum needs a name")) }
+                currentEnum = MinusEnum { name: parts[1], line }
+                module_.enums.push(currentEnum!)
                 continue
             }
             let offset_ = 0
@@ -218,6 +225,6 @@ export function parseDoofMinus(source: string): Result<MinusModule, string> {
         try instruction := parseInstruction(parts, line)
         currentBlock!.instructions.push(instruction)
     }
-    if currentClass != none || currentInterface != none || currentFunction != none { return Failure("unterminated declaration") }
+    if currentClass != none || currentInterface != none || currentEnum != none || currentFunction != none { return Failure("unterminated declaration") }
     return Success(module_)
 }

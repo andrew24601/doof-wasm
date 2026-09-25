@@ -1,5 +1,5 @@
 import { parseByte, parseDouble, parseFloat, parseInt, parseLong } from "std/parse"
-import { MinusBlock, MinusClass, MinusField, MinusFunction, MinusImport, MinusInstruction, MinusInterface, MinusMethod, MinusModule, MinusValue } from "./minus-ir"
+import { MinusBlock, MinusClass, MinusEnum, MinusField, MinusFunction, MinusImport, MinusInstruction, MinusInterface, MinusMethod, MinusModule, MinusValue } from "./minus-ir"
 import { classSize } from "./minus-layout"
 
 readonly MAX_BLOCK_SIZE = 1032
@@ -13,6 +13,11 @@ function classByName(module_: MinusModule, name: string): MinusClass | none {
 
 function interfaceByName(module_: MinusModule, name: string): MinusInterface | none {
     for item of module_.interfaces { if item.name == name { return item } }
+    return none
+}
+
+function enumByName(module_: MinusModule, name: string): MinusEnum | none {
+    for item of module_.enums { if item.name == name { return item } }
     return none
 }
 
@@ -55,7 +60,7 @@ function functionName(name: string): bool {
 }
 
 function checkType(module_: MinusModule, typeName: string, line: int): Result<none, string> {
-    if primitive(typeName) || typeName == "any" || classByName(module_, typeName) != none || interfaceByName(module_, typeName) != none { return Success(none) }
+    if primitive(typeName) || typeName == "any" || classByName(module_, typeName) != none || interfaceByName(module_, typeName) != none || enumByName(module_, typeName) != none { return Success(none) }
     return Failure(problem(line, "unknown type " + typeName))
 }
 
@@ -98,7 +103,7 @@ function paramTypes(values: MinusValue[]): string[] {
     return types
 }
 
-function checkLiteral(instruction: MinusInstruction, typeName: string): Result<none, string> {
+function checkLiteral(module_: MinusModule, instruction: MinusInstruction, typeName: string): Result<none, string> {
     if instruction.args.length != 1 { return Failure(problem(instruction.line, "const needs one literal")) }
     literal := instruction.args[0]
     if typeName == "none" || typeName == "bool" {
@@ -115,7 +120,8 @@ function checkLiteral(instruction: MinusInstruction, typeName: string): Result<n
     if typeName == "long" { _ := parseLong(literal) else { return Failure(problem(instruction.line, "invalid long constant")) }; return Success(none) }
     if typeName == "float" { _ := parseFloat(literal) else { return Failure(problem(instruction.line, "invalid float constant")) }; return Success(none) }
     if typeName == "double" { _ := parseDouble(literal) else { return Failure(problem(instruction.line, "invalid double constant")) }; return Success(none) }
-    return Failure(problem(instruction.line, "const needs a primitive result"))
+    if enumByName(module_, typeName) != none { _ := parseInt(literal) else { return Failure(problem(instruction.line, "invalid enum constant")) }; return Success(none) }
+    return Failure(problem(instruction.line, "const needs a primitive or enum result"))
 }
 
 function checkEdge(function_: MinusFunction, values: MinusValue[], args: string[], line: int): Result<none, string> {
@@ -130,7 +136,7 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
     line := instruction.line
     op := instruction.op
     resultType := if instruction.result == none then "none" else instruction.result!.typeName
-    if op == "const" { try checkLiteral(instruction, resultType); return Success(resultType) }
+    if op == "const" { try checkLiteral(module_, instruction, resultType); return Success(resultType) }
     if op == "string-const" {
         if args.length != 1 { return Failure(problem(line, "string-const needs one literal")) }
         if resultType != "__doof_string" || classByName(module_, resultType) == none {
@@ -142,7 +148,7 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         if args.length != 2 { return Failure(problem(line, op + " needs two operands")) }
         try left := valueType(values, args[0], line)
         try right := valueType(values, args[1], line)
-        if left != right || (!numeric(left) && !(op == "eq" && (left == "bool" || left == "char" || left == "none")) && !(op == "lt" && left == "char")) {
+        if left != right || (!numeric(left) && !(op == "eq" && (left == "bool" || left == "char" || left == "none" || enumByName(module_, left) != none)) && !(op == "lt" && left == "char")) {
             return Failure(problem(line, op + " needs matching supported operands"))
         }
         return Success(if op == "eq" || op == "lt" then "bool" else left)
@@ -230,7 +236,7 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         try source := valueType(values, args[0], line)
         if op == "copy" { return Success(source) }
         if op == "box" {
-            if source == "any" || interfaceByName(module_, source) != none { return Failure(problem(line, "box needs a primitive or concrete class")) }
+            if source == "any" || interfaceByName(module_, source) != none { return Failure(problem(line, "box needs a primitive, enum, or concrete class")) }
             return Success("any")
         }
         if op == "as" {
@@ -238,7 +244,7 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
             if class_ == none || !class_!.interfaces.contains(resultType) { return Failure(problem(line, "class does not implement " + resultType)) }
             return Success(resultType)
         }
-        if !numeric(source) || !numeric(resultType) { return Failure(problem(line, "convert needs numeric types")) }
+        if (!numeric(source) && enumByName(module_, source) == none) || !numeric(resultType) { return Failure(problem(line, "convert needs a numeric or enum source and numeric result")) }
         return Success(resultType)
     }
     if op == "is" || op == "cast" {
@@ -305,6 +311,12 @@ export function validateDoofMinus(module_: MinusModule): Result<none, string> {
                 return Failure(problem(owner.line, "destructor must name a private function taking its class and returning none"))
             }
         }
+    }
+    for index of 0..<module_.enums.length {
+        enum_ := module_.enums[index]
+        if !identifier(enum_.name) || primitive(enum_.name) || enum_.name == "any" { return Failure(problem(enum_.line, "invalid enum name")) }
+        if classByName(module_, enum_.name) != none || interfaceByName(module_, enum_.name) != none { return Failure(problem(enum_.line, "enum name collides with another type")) }
+        for previous of 0..<index { if module_.enums[previous].name == enum_.name { return Failure(problem(enum_.line, "duplicate enum")) } }
     }
     for owner of module_.interfaces {
         for index of 0..<owner.fields.length {

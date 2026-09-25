@@ -92,6 +92,7 @@ export function renderDoofMinus(module_: MinusModule): string {
     }
     output += "end\n"
   }
+  for enum_ of module_.enums { output += "enum " + enum_.name + "\nend\n" }
   for import_ of module_.imports { output += renderImport(import_) }
   for function_ of module_.functions { output += renderFunction(function_) }
   return output

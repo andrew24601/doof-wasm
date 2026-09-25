@@ -21,6 +21,11 @@ function firstError(diagnostics: Diagnostic[]): string {
 }
 
 function merge(target: MinusModule, source: MinusModule): none {
+  for enum_ of source.enums {
+    let found = false
+    for existing of target.enums { if existing.name == enum_.name { found = true } }
+    if !found { target.enums.push(enum_) }
+  }
   for class_ of source.classes {
     let found = false
     for existing of target.classes { if existing.name == class_.name { found = true } }
@@ -41,14 +46,24 @@ export function lowerDoofWasmSources(sources: SourceFile[], entry: string, loade
   frontend := analyzeWithLoader(sources, entry, loader)
   if frontend.diagnostics.length > 0 { return Failure(firstError(frontend.diagnostics)) }
   let lowered = MinusModule {}
+  let enumDeclarations: EnumDeclaration[] = []
+  let enumModules: string[] = []
   for module of frontend.analysis.modules {
     for statement of module.program.statements {
       case statement {
-        value: EnumDeclaration -> { return Failure(module.path + ":" + string(value.span.start.line) + ": enums are not supported by doof-wasm") }
+        value: EnumDeclaration -> {
+          if value.backingKind != "int" {
+            return Failure(module.path + ":" + string(value.span.start.line) + ": doof-wasm only supports integer-backed enums")
+          }
+          enumDeclarations.push(value)
+          enumModules.push(module.path)
+        }
         _ -> { }
       }
     }
-    result := lowerDoofProgram(module.program, module.path, entryPath)
+  }
+  for module of frontend.analysis.modules {
+    result := lowerDoofProgram(module.program, module.path, entryPath, enumDeclarations, enumModules)
     case result {
       success: Success<MinusModule> -> { merge(lowered, success.value) }
       failure: Failure<string> -> { return Failure(module.path + ": " + failure.error) }

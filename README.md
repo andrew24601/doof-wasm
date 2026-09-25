@@ -10,7 +10,8 @@ source paths remain attached to lowered declarations and instructions for
 diagnostics. The CLI resolves imports relative to their importing file. It currently
   supports local bindings, returns, `if`/`else` branches,
   `while` loops, arithmetic and comparisons, calls, fields, class construction,
-  interface conversion, numeric casts, byte and char arrays, and type aliases
+  interface conversion, integer-backed enums (including distinct enum tags in
+  `any` unions), numeric casts, byte and char arrays, and type aliases
   whose resolved types are supported by the backend. Both array types support
   literals, `.length`, indexed reads and writes, and are limited to 1024
   elements. Basic strings are represented by an injected string class over a
@@ -20,7 +21,7 @@ diagnostics. The CLI resolves imports relative to their importing file. It curre
   `.indexOf(search)` are supported. String interpolation and other
   string methods are not supported yet. Other collection values are not
   supported by lowering yet.
-Generics, enums, and loop labels, `break`, or `continue` are not supported yet.
+Generics, string-backed enums, and loop labels, `break`, or `continue` are not supported yet.
 
 ```sh
 doof run src/doof-cli.do -- example.do example.wasm

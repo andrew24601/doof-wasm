@@ -57,6 +57,9 @@ function tag(module_: MinusModule, typeName: string): int {
     let names: string[] = ["none", "bool", "char", "byte", "short", "int", "long", "float", "double"]
     for index of 0..<names.length { if names[index] == typeName { return index } }
     for index of 0..<module_.classes.length { if module_.classes[index].name == typeName { return 32 + index } }
+    // Enums keep nominal any-tags while using scalar i32 storage. Their tag
+    // range follows class tags so reference management can identify classes.
+    for index of 0..<module_.enums.length { if module_.enums[index].name == typeName { return 32 + module_.classes.length + index } }
     panic("validated type tag missing")
 }
 
@@ -250,9 +253,12 @@ function emitRelease(module_: MinusModule): int[] {
     localGet(b, 0); load32(b, 4); op(b, 69); op(b, 69); if_(b); op(b, 15); end(b)
     localGet(b, 1); i32(b, ANY_TAG); op(b, 70); if_(b)
     localGet(b, 0); load16Unsigned(b, 8); localSet(b, 2)
-    localGet(b, 2); i32(b, 32); op(b, 79); if_(b)
-    localGet(b, 0); load32(b, 16); call(b, runtimeFunctionIndex(module_, 2))
-    end(b); end(b)
+    for index of 0..<module_.classes.length {
+        localGet(b, 2); i32(b, 32 + index); op(b, 70); if_(b)
+        localGet(b, 0); load32(b, 16); call(b, runtimeFunctionIndex(module_, 2))
+        end(b)
+    }
+    end(b)
     for index of 0..<module_.classes.length {
         class_ := module_.classes[index]
         let hasReferences = false

@@ -1,21 +1,21 @@
 // Lower checked Doof AST nodes directly into the doof-- model.
 import {
-  PrimitiveType, ClassType, InterfaceType, ArrayResolvedType, SerialValueResolvedType, NoneType,
+  PrimitiveType, ClassType, EnumType, InterfaceType, ArrayResolvedType, SerialValueResolvedType, NoneType,
   UnionResolvedType, ResolvedType, FunctionType,
 } from "doof/src/semantic"
 import {
-  Program, Statement, FunctionDeclaration, ClassDeclaration, InterfaceDeclaration,
+  Program, Statement, FunctionDeclaration, ClassDeclaration, InterfaceDeclaration, EnumDeclaration,
   Expression, Block, ReturnStatement, ImmutableBinding, LetDeclaration,
   ReadonlyDeclaration, ExpressionStatement, IntLiteral, LongLiteral, FloatLiteral,
   DoubleLiteral, StringLiteral, CharLiteral, BoolLiteral, NoneLiteral, Identifier,
   BinaryExpression, UnaryExpression, AssignmentExpression, CallExpression, MemberExpression,
-  ConstructExpression, ArrayLiteral, IndexExpression, AsExpression, ThisExpression, IfStatement, IfBranch,
+  ConstructExpression, ArrayLiteral, IndexExpression, AsExpression, ThisExpression, DotShorthand, IfStatement, IfBranch,
   CaseStatement, TypePattern, ValuePattern, WildcardPattern, WhileStatement,
   ImportDeclaration, ExportList,
 } from "doof/src/ast"
 import {
   MinusModule, MinusClass, MinusField, MinusInterface, MinusMethod, MinusValue, MinusImport,
-  MinusFunction, MinusBlock, MinusInstruction,
+  MinusFunction, MinusBlock, MinusInstruction, MinusEnum,
 } from "./minus-ir"
 
 readonly BYTE_ARRAY_CLASS = "__doof_array_byte"
@@ -42,6 +42,8 @@ class FunctionLowering {
   let terminated: bool = false
   let sourcePath: string = ""
   let currentLine: int = 0
+  enumDeclarations: EnumDeclaration[] = []
+  enumModules: string[] = []
 }
 
 function qualifiedName(modulePath: string, name: string): string {
@@ -53,10 +55,22 @@ function qualifiedName(modulePath: string, name: string): string {
 
 function atLine(line: int, message: string): string => "line " + string(line) + ": " + message
 
+function enumVariantValue(declarations: EnumDeclaration[], modules: string[], modulePath: string, enumName: string, variantName: string): int | none {
+  for index of 0..<declarations.length {
+    declaration := declarations[index]
+    if modules[index] != modulePath || declaration.name != enumName { continue }
+    for variant of declaration.variants {
+      if variant.name == variantName { return variant.resolvedIntValue }
+    }
+  }
+  return none
+}
+
 function resolvedName(type_: ResolvedType): string {
   case type_ {
     primitive: PrimitiveType -> { return if primitive.name == "string" then STRING_CLASS else primitive.name }
     class_: ClassType -> { return qualifiedName(class_.symbol.module, class_.name) }
+    enum_: EnumType -> { return qualifiedName(enum_.symbol.module, enum_.name) }
     interface_: InterfaceType -> { return qualifiedName(interface_.symbol.module, interface_.name) }
     array: ArrayResolvedType -> {
       case array.elementType {
@@ -82,6 +96,7 @@ function supportedUnionMember(type_: ResolvedType): bool {
   case type_ {
     primitive: PrimitiveType -> { return ["bool", "char", "byte", "short", "int", "long", "float", "double", "string"].contains(primitive.name) }
     _: ClassType -> { return true }
+    _: EnumType -> { return true }
     _: SerialValueResolvedType -> { return true }
     _: NoneType -> { return true }
     union_: UnionResolvedType -> {
@@ -160,6 +175,8 @@ function blockContext(parent: FunctionLowering, locals: SourceBinding[], id: int
     child.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName })
   }
   child.sourcePath = parent.sourcePath
+  for declaration of parent.enumDeclarations { child.enumDeclarations.push(declaration) }
+  for modulePath of parent.enumModules { child.enumModules.push(modulePath) }
   child.currentBlock = MinusBlock { name, params, line: 0, sourcePath: parent.sourcePath }
   child.blocks.push(child.currentBlock)
   return child
@@ -601,6 +618,32 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
     }
     value: MemberExpression -> {
       if value.optional || value.force { context.failed = "optional member access is not supported by doof-wasm"; return "" }
+      if value.property == "value" && isEnumType(value.object.resolvedType) {
+        enumValue := lowerExpression(context, value.object)
+        return result(context, "convert", [enumValue], typeFromValue(expression))
+      }
+      if value.resolvedMember != none && value.resolvedMember!.owner != none {
+        case value.resolvedMember!.owner! {
+          enum_: EnumType -> {
+            if value.property == "value" {
+              enumValue := lowerExpression(context, value.object)
+              return result(context, "convert", [enumValue], typeFromValue(expression))
+            }
+            variant := enumVariantValue(context.enumDeclarations, context.enumModules, enum_.symbol.module, enum_.name, value.property)
+            if variant != none { return result(context, "const", [string(variant!)], resolvedName(enum_)) }
+          }
+          _ -> { }
+        }
+      }
+      if value.resolvedMember != none && value.resolvedMember!.type_ != none {
+        case value.resolvedMember!.type_! {
+          enum_: EnumType -> {
+            variant := enumVariantValue(context.enumDeclarations, context.enumModules, enum_.symbol.module, enum_.name, value.property)
+            if variant != none { return result(context, "const", [string(variant!)], resolvedName(enum_)) }
+          }
+          _ -> { }
+        }
+      }
       if value.property == "length" && (typeFromValue(value.object) == BYTE_ARRAY_CLASS || typeFromValue(value.object) == CHAR_ARRAY_CLASS) {
         array := lowerExpression(context, value.object)
         return result(context, "call-method", [array, "length"], "int")
@@ -619,6 +662,14 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       return result(context, "call-method", [array, "get", index], typeFromValue(expression))
     }
     value: ArrayLiteral -> { return lowerPrimitiveArrayLiteral(context, value, expression) }
+    shorthand: DotShorthand -> {
+      if shorthand.resolvedShorthandOwnerKind == "enum" {
+        variant := enumVariantValue(context.enumDeclarations, context.enumModules, shorthand.resolvedShorthandOwnerModule, shorthand.resolvedShorthandOwnerName, shorthand.name)
+        if variant != none { return result(context, "const", [string(variant!)], typeFromValue(expression)) }
+      }
+      context.failed = "unsupported shorthand value"
+      return ""
+    }
     value: CallExpression -> { return lowerCall(context, value, expression) }
     value: ConstructExpression -> {
       if value.spread != none { context.failed = "construction spreads are not supported by doof-wasm"; return "" }
@@ -652,6 +703,11 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
     }
     _ -> { context.failed = "expression is not supported by doof-wasm"; return "" }
   }
+}
+
+function isEnumType(type_: ResolvedType | none): bool {
+  if type_ == none { return false }
+  case type_! { _: EnumType -> { return true } _ -> { return false } }
 }
 
 function lowerCall(context: FunctionLowering, call: CallExpression, expression: Expression): string {
@@ -899,11 +955,13 @@ function functionResultType(fn: FunctionDeclaration): ResolvedType | none {
   }
 }
 
-function lowerFunction(fn: FunctionDeclaration, modulePath: string, className: string = "", interfaceNames: string[] = []): Result<MinusFunction, string> {
+function lowerFunction(fn: FunctionDeclaration, modulePath: string, className: string = "", interfaceNames: string[] = [], enumDeclarations: EnumDeclaration[] = [], enumModules: string[] = []): Result<MinusFunction, string> {
   let params: MinusValue[] = []
   let functionName = qualifiedName(modulePath, fn.name)
   let context = FunctionLowering { sourcePath: modulePath, currentBlock: MinusBlock { name: "entry", line: fn.span.start.line, sourcePath: modulePath } }
   for interfaceName of interfaceNames { context.interfaceNames.push(interfaceName) }
+  for declaration of enumDeclarations { context.enumDeclarations.push(declaration) }
+  for enumModule of enumModules { context.enumModules.push(enumModule) }
   if className != "" {
     functionName = className + "." + fn.name
     params.push(MinusValue { name: "%self", typeName: className })
@@ -987,6 +1045,9 @@ function lowerTypes(program: Program, module_: MinusModule, modulePath: string):
           })
         }
         module_.interfaces.push(interfaceOut)
+      }
+      enum_: EnumDeclaration -> {
+        module_.enums.push(MinusEnum { name: qualifiedName(modulePath, enum_.name), line: enum_.span.start.line, sourcePath: modulePath })
       }
       _ -> { }
     }
@@ -1203,7 +1264,7 @@ function injectStringImplementation(module_: MinusModule): none {
   }) }
 }
 
-export function lowerDoofProgram(program: Program, modulePath: string = "/main.do", entryPath: string = "/main.do"): Result<MinusModule, string> {
+export function lowerDoofProgram(program: Program, modulePath: string = "/main.do", entryPath: string = "/main.do", enumDeclarations: EnumDeclaration[] = [], enumModules: string[] = []): Result<MinusModule, string> {
   let module_ = MinusModule {}
   try lowerTypes(program, module_, modulePath)
   let interfaceNames: string[] = []
@@ -1219,7 +1280,7 @@ export function lowerDoofProgram(program: Program, modulePath: string = "/main.d
         }
         if fn.typeParams.length > 0 { return Failure(atLine(fn.span.start.line, "generic functions are not supported by doof-wasm")) }
         if fn.bodyless || fn.isolated_ { return Failure(atLine(fn.span.start.line, "bodyless and isolated functions are not supported by doof-wasm")) }
-        try lowered := lowerFunction(fn, modulePath, "", interfaceNames)
+        try lowered := lowerFunction(fn, modulePath, "", interfaceNames, enumDeclarations, enumModules)
         lowered.exported = fn.exported && modulePath == entryPath
         if lowered.exported { lowered.exportName = fn.name }
         module_.functions.push(lowered)
@@ -1230,14 +1291,15 @@ export function lowerDoofProgram(program: Program, modulePath: string = "/main.d
           if method.bodyless || method.isolated_ || method.typeParams.length > 0 {
             return Failure(atLine(method.span.start.line, "bodyless, isolated, or generic methods are not supported by doof-wasm"))
           }
-          try lowered := lowerFunction(method, modulePath, qualifiedName(modulePath, class_.name), interfaceNames)
+          try lowered := lowerFunction(method, modulePath, qualifiedName(modulePath, class_.name), interfaceNames, enumDeclarations, enumModules)
           module_.functions.push(lowered)
         }
       }
       _: InterfaceDeclaration -> { }
+      _: EnumDeclaration -> { }
       _: ImportDeclaration -> { }
       _: ExportList -> { }
-      _ -> { return Failure(atLine(statement.span.start.line, "top-level declarations must be functions, classes, or interfaces")) }
+      _ -> { return Failure(atLine(statement.span.start.line, "top-level declaration is not supported by doof-wasm")) }
     }
   }
   if moduleUsesArrayClass(module_, STRING_CLASS) { injectStringImplementation(module_) }
