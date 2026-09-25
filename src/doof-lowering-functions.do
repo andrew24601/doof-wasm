@@ -575,6 +575,9 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       }
     }
     value: UnaryExpression -> {
+      if value.operator == "try!" || value.operator == "try?" {
+        return lowerTryOperator(context, value, expression)
+      }
       operand := lowerExpression(context, value.operand)
       if value.operator == "-" {
         zero := result(context, "const", ["0"], typeFromValue(value.operand))
@@ -705,6 +708,82 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
     }
     _ -> { context.failed = "expression is not supported by doof-wasm"; return "" }
   }
+}
+
+function lowerTryOperator(context: FunctionLowering, operation: UnaryExpression, expression: Expression): string {
+  operand := lowerExpression(context, operation.operand)
+  if context.failed != "" { return "" }
+  context.currentLine = expression.span.start.line
+  operandType := operation.operand.resolvedType
+  if operandType == none {
+    context.failed = operation.operator + " operand has no resolved type"
+    return ""
+  }
+  case operandType! {
+    _: ResultResolvedType -> { }
+    _ -> { context.failed = operation.operator + " operand is not a Result"; return "" }
+  }
+
+  locals := latestLocals(context)
+  id := context.nextBlock
+  context.nextBlock = context.nextBlock + 1
+  failureName := "try_failure" + string(id)
+  successName := "try_success" + string(id)
+  joinName := "try_join" + string(id)
+  let branchArgs: string[] = [result(context, "is", [operand, RESULT_FAILURE_CLASS], "bool"), failureName]
+  for local of locals { branchArgs.push(local.valueName) }
+  branchArgs.push(operand)
+  branchArgs.push("|"); branchArgs.push(successName)
+  for local of locals { branchArgs.push(local.valueName) }
+  branchArgs.push(operand)
+  effect(context, "branch", branchArgs)
+
+  failureContext := blockContext(context, locals, id, "f", failureName)
+  failureSubject := "%b" + string(id) + "f" + string(locals.length)
+  failureContext.currentBlock.params.push(MinusValue { name: failureSubject, typeName: "any" })
+  if operation.operator == "try!" {
+    effect(failureContext, "panic", [])
+    failureContext.terminated = true
+  } else {
+    let failureValue: string = result(failureContext, "const", ["none"], "none")
+    targetType := typeFromValue(expression)
+    if targetType == "any" { failureValue = result(failureContext, "box", [failureValue], "any") }
+    effect(failureContext, "jump", concatValues([joinName], concatValues(bindingValues(failureContext, locals), [failureValue])))
+  }
+
+  successContext := blockContext(context, locals, id, "s", successName)
+  successSubject := "%b" + string(id) + "s" + string(locals.length)
+  successContext.currentBlock.params.push(MinusValue { name: successSubject, typeName: "any" })
+  successContext.nextValue = failureContext.nextValue
+  successContext.nextBlock = failureContext.nextBlock
+  let payload = result(successContext, "get", [successSubject, "value"], "any")
+  let successType = ""
+  case operandType! { resultType: ResultResolvedType -> { successType = resolvedName(resultType.valueType) } _ -> { } }
+  if successType != "" && successType != "any" { payload = result(successContext, "cast", [payload, successType], successType) }
+  if operation.operator == "try?" {
+    targetType := typeFromValue(expression)
+    if targetType == "any" && successType != "any" { payload = result(successContext, "box", [payload], "any") }
+  }
+
+  resultType := typeFromValue(expression)
+  effect(successContext, "jump", concatValues([joinName], concatValues(bindingValues(successContext, locals), [payload])))
+
+  joinParams: MinusValue[] = []
+  for index of 0..<locals.length {
+    storageType := if locals[index].boxedTypeName == "" then locals[index].typeName else locals[index].boxedTypeName
+    joinParams.push(MinusValue { name: "%b" + string(id) + "j" + string(index), typeName: storageType })
+  }
+  joinNameValue := "%b" + string(id) + "j" + string(locals.length)
+  joinParams.push(MinusValue { name: joinNameValue, typeName: resultType })
+  appendContext(context, failureContext)
+  appendContext(context, successContext)
+  context.currentBlock = MinusBlock { name: joinName, params: joinParams, sourcePath: context.sourcePath }
+  context.blocks.push(context.currentBlock)
+  for index of 0..<locals.length {
+    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
+  }
+  context.terminated = false
+  return joinNameValue
 }
 
 function isEnumType(type_: ResolvedType | none): bool {

@@ -52,9 +52,11 @@ the full Doof compiler.
   positional and named class construction; class-to-interface assignment;
   numeric conversion; and `any`
   boxing/casts. Union members are boxed into `any`; comparisons with `none`
-  test the contained tag. A nullable value can be unwrapped with the `else`
-  binding form. The `panic(message)` intrinsic is supported as a terminating
-  trap; the Wasm backend discards its message.
+  test the contained tag. `try!` unwraps a Result and traps on failure;
+  `try?` unwraps the success value and produces `none` on failure. A nullable
+  value can be unwrapped with the `else` binding form. The `panic(message)`
+  intrinsic is supported as a terminating trap; the Wasm backend discards its
+  message.
 
 Local bindings are converted to doof-- SSA values. Values that cross branches
 or loop edges are passed as block arguments.
