@@ -37,6 +37,7 @@ function blockByName(function_: MinusFunction, name: string): MinusBlock | none 
 function primitive(typeName: string): bool => ["none", "bool", "char", "byte", "short", "int", "long", "float", "double"].contains(typeName)
 function numeric(typeName: string): bool => ["byte", "short", "int", "long", "float", "double"].contains(typeName)
 function reference(module_: MinusModule, typeName: string): bool => typeName == "any" || classByName(module_, typeName) != none || interfaceByName(module_, typeName) != none
+function arrayElementType(module_: MinusModule, typeName: string): bool => ["bool", "char", "byte", "short", "int", "long", "float", "double"].contains(typeName) || reference(module_, typeName) || enumByName(module_, typeName) != none
 function hostExportType(module_: MinusModule, typeName: string): bool => !reference(module_, typeName) || typeName == "__doof_string"
 
 function identifier(name: string): bool {
@@ -166,13 +167,14 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         if args.length != 2 { return Failure(problem(line, "array-alloc needs a length and element type")) }
         try lengthType := valueType(values, args[0], line)
         if lengthType != "int" { return Failure(problem(line, "array length needs int")) }
-        if !["bool", "char", "byte", "short", "int", "long", "float", "double"].contains(args[1]) { return Failure(problem(line, "unsupported array element type " + args[1])) }
+        if !arrayElementType(module_, args[1]) { return Failure(problem(line, "unsupported array element type " + args[1])) }
         return Success("int")
     }
     if op == "array-free" {
-        if args.length != 1 { return Failure(problem(line, "array-free needs one block handle")) }
+        if args.length != 1 && args.length != 2 { return Failure(problem(line, "array-free needs a block handle and optional element type")) }
         try handleType := valueType(values, args[0], line)
         if handleType != "int" { return Failure(problem(line, "array-free needs an int block handle")) }
+        if args.length == 2 && !arrayElementType(module_, args[1]) { return Failure(problem(line, "unsupported array element type " + args[1])) }
         return Success(none)
     }
     if op == "array-length" {
@@ -186,7 +188,7 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         try handleType := valueType(values, args[0], line)
         try indexType := valueType(values, args[1], line)
         if handleType != "int" || indexType != "int" { return Failure(problem(line, "array-get needs int handle and index")) }
-        if !["bool", "char", "byte", "short", "int", "long", "float", "double"].contains(resultType) { return Failure(problem(line, "unsupported array element type " + resultType)) }
+        if !arrayElementType(module_, resultType) { return Failure(problem(line, "unsupported array element type " + resultType)) }
         return Success(resultType)
     }
     if op == "array-set" {
@@ -195,7 +197,7 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         try indexType := valueType(values, args[1], line)
         try elementType := valueType(values, args[2], line)
         if handleType != "int" || indexType != "int" { return Failure(problem(line, "array-set needs int handle and index")) }
-        if !["bool", "char", "byte", "short", "int", "long", "float", "double"].contains(elementType) { return Failure(problem(line, "unsupported array element type " + elementType)) }
+        if !arrayElementType(module_, elementType) { return Failure(problem(line, "unsupported array element type " + elementType)) }
         return Success(none)
     }
     if op == "get" || op == "set" {

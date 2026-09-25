@@ -18,10 +18,13 @@ the full Doof compiler.
   `string`, integer-backed enums, classes, interfaces, `SerialValue`, and union
   types (lowered to doof-- `any`), including aliases that resolve to supported
   types. Enum tags remain distinct from integer tags inside `any` unions.
-- Mutable and read-only `byte[]` and `char[]` values, including literals,
-  `.length`, indexed reads, and indexed writes on mutable arrays. Array literals
-  are limited to 1024 elements. Other collection types remain unsupported by
-  source lowering.
+- Mutable and read-only arrays of `bool`, `char`, `byte`, `short`, `int`,
+  `long`, `float`, `double`, enums, class and interface references, and `any`
+  unions. This includes strings and nested arrays when their element types are
+  supported. Arrays support literals, `.length`, indexed reads, and indexed
+  writes on mutable arrays. Payloads are limited to 1024 bytes, so the maximum
+  element count depends on element width. Other collection types remain
+  unsupported by source lowering.
 - Basic `string` values backed by an injected string class and a wrapped,
   read-only `char[]`; string literals, `.length`, and indexed character reads
   are supported. Content-based comparison operators, `.compare(other)`, and
@@ -49,8 +52,8 @@ or loop edges are passed as block arguments.
 
 ## Not supported yet
 
-Imports and multiple source files, generics, string-backed enums, arrays other
-than `byte[]` and `char[]`, labeled loops, `break`, `continue`, while-else
+Imports and multiple source files, generics, string-backed enums, arrays whose
+element type is unsupported by doof--, labeled loops, `break`, `continue`, while-else
 clauses, static members, weak references, closures, case expressions,
 value/range patterns, and multiple patterns per case arm,
 async code, compound assignments, nested lexical blocks, and other source expressions. The doof-- backend

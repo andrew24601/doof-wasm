@@ -140,7 +140,7 @@ export function testExecutesByteArrayReadsWritesBoundsAndFinalRelease(): none {
   runWasm(bytes, "byte-array", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;for(let i=0;i<1000;i++)if(e.main()!==268)process.exit(1);try{e.bounds();process.exit(2)}catch(x){if(!(x instanceof WebAssembly.RuntimeError))process.exit(3)}`)
 }
 
-export function testByteArraySourceLimitAndUnsupportedElementTypes(): none {
+export function testArraySourcePayloadLimitAndPrimitiveAndEnumElements(): none {
   let values = ""
   for index of 0..<1025 {
     if index > 0 { values += "," }
@@ -153,11 +153,8 @@ export function testByteArraySourceLimitAndUnsupportedElementTypes(): none {
     failure: Failure<string> -> { Assert.stringContains(failure.error, "limited to 1024") }
     _ -> { Assert.fail("Expected an oversized byte[] literal to be rejected") }
   }
-  unsupported := lowerDoofWasmSources([
-    SourceFile { path: "/main.do", source: "function main(): int { values: int[] := [1]\nreturn values[0] }" },
+  bytes := try! compileDoofWasmSources([
+    SourceFile { path: "/main.do", source: "enum Kind { First = 2, Last = 9 }\nexport function primitivePart(): int { values: int[] := [1, 2, 3]\nvalues[1] = 7\nreturn values[0] + values[1] + values[2] + values.length }\nexport function enumPart(): int { kinds: Kind[] := [Kind.First, Kind.Last]\nkinds[0] = Kind.Last\nreturn kinds[0].value + kinds[1].value + kinds.length }\nexport function main(): int { return primitivePart() + enumPart() }" },
   ], "/main.do")
-  case unsupported {
-    failure: Failure<string> -> { Assert.stringContains(failure.error, "only byte[] and char[] literals") }
-    _ -> { Assert.fail("Expected a non-byte array to be rejected") }
-  }
+  runWasm(bytes, "primitive-enum-arrays", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;const actual=e.main();if(actual!==34)throw new Error("expected 34, got "+actual)`)
 }

@@ -348,6 +348,16 @@ function emitArrayInstruction(bytes: int[], module_: MinusModule, values: MinusV
     }
     if instruction.op == "array-free" {
         getValue(bytes, values, args[0]); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DATA_TAG); op(bytes, 71); if_(bytes); op(bytes, 0); end(bytes)
+        if args.length == 2 && reference(module_, args[1]) {
+            i32(bytes, 0); localSet(bytes, scratchIndex)
+            block(bytes); loop(bytes)
+            localGet(bytes, scratchIndex); getValue(bytes, values, args[0]); load32(bytes, 4); op(bytes, 78); op(bytes, 69); op(bytes, 13); unsigned(bytes, 1)
+            getValue(bytes, values, args[0]); i32(bytes, 8); op(bytes, 106)
+            localGet(bytes, scratchIndex); i32(bytes, 2); op(bytes, 116); op(bytes, 106); load32(bytes, 0); call(bytes, runtimeFunctionIndex(module_, 2))
+            localGet(bytes, scratchIndex); i32(bytes, 1); op(bytes, 106); localSet(bytes, scratchIndex)
+            op(bytes, 12); unsigned(bytes, 0)
+            end(bytes); end(bytes)
+        }
         getValue(bytes, values, args[0]); load16Unsigned(bytes, 2); i32(bytes, MIN_BLOCK_SIZE); op(bytes, 107); i32(bytes, 4); op(bytes, 118); i32(bytes, 2); op(bytes, 116); localSet(bytes, scratchIndex)
         getValue(bytes, values, args[0]); i32(bytes, 0); store16(bytes, 0)
         getValue(bytes, values, args[0]); localGet(bytes, scratchIndex); load32(bytes, 0); store32(bytes, 4)
@@ -363,13 +373,19 @@ function emitArrayInstruction(bytes: int[], module_: MinusModule, values: MinusV
     checkArrayBounds(bytes, values, args[0], args[1])
     if instruction.op == "array-get" {
         arrayAddress(bytes, values, args[0], args[1], typeName)
-        op(bytes, arrayLoadCode(typeName)); unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "byte" || typeName == "bool" || typeName == "char" then 0 else 2); unsigned(bytes, 8)
+        op(bytes, arrayLoadCode(typeName)); unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "byte" || typeName == "bool" || typeName == "char" then 0 else 2); unsigned(bytes, 0)
+        retainTop(bytes, module_, typeName)
         setResult(bytes, module_, values, instruction)
         return
     }
+    if reference(module_, typeName) {
+        arrayAddress(bytes, values, args[0], args[1], typeName)
+        op(bytes, arrayLoadCode(typeName)); unsigned(bytes, 2); unsigned(bytes, 8); call(bytes, runtimeFunctionIndex(module_, 2))
+        getValue(bytes, values, args[2]); call(bytes, runtimeFunctionIndex(module_, 1))
+    }
     arrayAddress(bytes, values, args[0], args[1], typeName)
     getValue(bytes, values, args[2])
-    op(bytes, arrayStoreCode(typeName)); unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "byte" || typeName == "bool" || typeName == "char" then 0 else 2); unsigned(bytes, 8)
+    op(bytes, arrayStoreCode(typeName)); unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "byte" || typeName == "bool" || typeName == "char" then 0 else 2); unsigned(bytes, 0)
 }
 
 function body(bytes: int[], locals: int[], instructions: int[]): none {

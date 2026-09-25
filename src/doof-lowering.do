@@ -23,6 +23,19 @@ readonly BYTE_ARRAY_DESTRUCTOR = "__doof_array_byte.destroy"
 readonly CHAR_ARRAY_CLASS = "__doof_array_char"
 readonly CHAR_ARRAY_DESTRUCTOR = "__doof_array_char.destroy"
 readonly STRING_CLASS = "__doof_string"
+readonly ARRAY_CLASS_PREFIX = "__doof_array_type"
+
+function arrayClassName(elementType: string): string {
+  return ARRAY_CLASS_PREFIX + "_" + elementType
+}
+
+function arrayElementFromClassName(className: string): string {
+  prefix := ARRAY_CLASS_PREFIX + "_"
+  if !className.startsWith(prefix) { return "" }
+  return className.substring(prefix.length, className.length)
+}
+
+function isArrayClass(typeName: string): bool => typeName == BYTE_ARRAY_CLASS || typeName == CHAR_ARRAY_CLASS || typeName.startsWith(ARRAY_CLASS_PREFIX + "_")
 
 class SourceBinding {
   name: string
@@ -73,14 +86,11 @@ function resolvedName(type_: ResolvedType): string {
     enum_: EnumType -> { return qualifiedName(enum_.symbol.module, enum_.name) }
     interface_: InterfaceType -> { return qualifiedName(interface_.symbol.module, interface_.name) }
     array: ArrayResolvedType -> {
-      case array.elementType {
-        primitive: PrimitiveType -> {
-          if primitive.name == "byte" { return BYTE_ARRAY_CLASS }
-          if primitive.name == "char" { return CHAR_ARRAY_CLASS }
-        }
-        _ -> { }
-      }
-      return ""
+      elementType := resolvedName(array.elementType)
+      if elementType == "byte" { return BYTE_ARRAY_CLASS }
+      if elementType == "char" { return CHAR_ARRAY_CLASS }
+      if elementType == "" || elementType == "none" { return "" }
+      return arrayClassName(elementType)
     }
     _: SerialValueResolvedType -> { return "any" }
     union_: UnionResolvedType -> {
@@ -450,15 +460,16 @@ function lowerCaseStatement(context: FunctionLowering, statement: CaseStatement)
   }
 }
 
-function lowerPrimitiveArrayLiteral(context: FunctionLowering, literal: ArrayLiteral, expression: Expression): string {
+function lowerArrayLiteral(context: FunctionLowering, literal: ArrayLiteral, expression: Expression): string {
   arrayClass := typeFromValue(expression)
-  elementType := if arrayClass == BYTE_ARRAY_CLASS then "byte" else if arrayClass == CHAR_ARRAY_CLASS then "char" else ""
+  elementType := if arrayClass == BYTE_ARRAY_CLASS then "byte" else if arrayClass == CHAR_ARRAY_CLASS then "char" else arrayElementFromClassName(arrayClass)
   if elementType == "" {
-    context.failed = "only byte[] and char[] literals are supported by doof-wasm"
+    context.failed = "only byte[] and char[] literals or class-instance arrays are supported by doof-wasm"
     return ""
   }
-  if literal.elements.length > 1024 {
-    context.failed = elementType + "[] literals are limited to 1024 elements"
+  width := if ["bool", "byte", "char"].contains(elementType) then 1 else if elementType == "short" then 2 else if elementType == "long" || elementType == "double" then 8 else 4
+  if literal.elements.length > 1024 \ width {
+    context.failed = "array literals are limited to 1024 payload bytes"
     return ""
   }
   length := result(context, "const", [string(literal.elements.length)], "int")
@@ -644,7 +655,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
           _ -> { }
         }
       }
-      if value.property == "length" && (typeFromValue(value.object) == BYTE_ARRAY_CLASS || typeFromValue(value.object) == CHAR_ARRAY_CLASS) {
+      if value.property == "length" && isArrayClass(typeFromValue(value.object)) {
         array := lowerExpression(context, value.object)
         return result(context, "call-method", [array, "length"], "int")
       }
@@ -661,7 +672,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       index := lowerExpression(context, value.index)
       return result(context, "call-method", [array, "get", index], typeFromValue(expression))
     }
-    value: ArrayLiteral -> { return lowerPrimitiveArrayLiteral(context, value, expression) }
+    value: ArrayLiteral -> { return lowerArrayLiteral(context, value, expression) }
     shorthand: DotShorthand -> {
       if shorthand.resolvedShorthandOwnerKind == "enum" {
         variant := enumVariantValue(context.enumDeclarations, context.enumModules, shorthand.resolvedShorthandOwnerModule, shorthand.resolvedShorthandOwnerName, shorthand.name)
@@ -1082,7 +1093,7 @@ function moduleUsesArrayClass(module_: MinusModule, arrayClass: string): bool {
   return false
 }
 
-function injectPrimitiveArrayImplementation(module_: MinusModule, arrayClass: string, elementType: string, destructorName: string): none {
+function injectArrayImplementation(module_: MinusModule, arrayClass: string, elementType: string, destructorName: string): none {
   let class_ = MinusClass { name: arrayClass, finalizer: destructorName }
   class_.fields.push(MinusField { name: "data", typeName: "int" })
   module_.classes.push(class_)
@@ -1092,7 +1103,7 @@ function injectPrimitiveArrayImplementation(module_: MinusModule, arrayClass: st
     result: "none",
     blocks: [MinusBlock { name: "entry", instructions: [
       MinusInstruction { op: "get", result: MinusValue { name: "%data", typeName: "int" }, args: ["%self", "data"] },
-      MinusInstruction { op: "array-free", args: ["%data"] },
+      MinusInstruction { op: "array-free", args: ["%data", elementType] },
       MinusInstruction { op: "return" },
     ] }],
   })
@@ -1126,6 +1137,54 @@ function injectPrimitiveArrayImplementation(module_: MinusModule, arrayClass: st
       MinusInstruction { op: "return", args: ["%length"] },
     ] }],
   })
+}
+
+function injectArrayClassRecursively(module_: MinusModule, arrayClass: string, injected: string[]): none {
+  if injected.contains(arrayClass) { return }
+  elementType := if arrayClass == BYTE_ARRAY_CLASS then "byte" else if arrayClass == CHAR_ARRAY_CLASS then "char" else arrayElementFromClassName(arrayClass)
+  if elementType == "" { return }
+  if elementType == STRING_CLASS {
+    let hasStringClass = false
+    for class_ of module_.classes { if class_.name == STRING_CLASS { hasStringClass = true } }
+    if !hasStringClass { injectStringImplementation(module_) }
+  }
+  if isArrayClass(elementType) {
+    injectArrayClassRecursively(module_, elementType, injected)
+  }
+  if arrayClass == BYTE_ARRAY_CLASS {
+    injectArrayImplementation(module_, arrayClass, "byte", BYTE_ARRAY_DESTRUCTOR)
+  } else if arrayClass == CHAR_ARRAY_CLASS {
+    injectArrayImplementation(module_, arrayClass, "char", CHAR_ARRAY_DESTRUCTOR)
+  } else {
+    injectArrayImplementation(module_, arrayClass, elementType, arrayClass + ".destroy")
+  }
+  injected.push(arrayClass)
+}
+
+function addArrayType(types: string[], typeName: string): none {
+  if typeName.startsWith(ARRAY_CLASS_PREFIX + "_") && !types.contains(typeName) { types.push(typeName) }
+}
+
+function usedArrayTypes(module_: MinusModule): string[] {
+  let types: string[] = []
+  for class_ of module_.classes { for field of class_.fields { addArrayType(types, field.typeName) } }
+  for interface_ of module_.interfaces {
+    for field of interface_.fields { addArrayType(types, field.typeName) }
+    for method of interface_.methods { addArrayType(types, method.result); for parameter of method.params { addArrayType(types, parameter) } }
+  }
+  for import_ of module_.imports {
+    addArrayType(types, import_.result)
+    for parameter of import_.params { addArrayType(types, parameter.typeName) }
+  }
+  for function_ of module_.functions {
+    addArrayType(types, function_.result)
+    for parameter of function_.params { addArrayType(types, parameter.typeName) }
+    for block of function_.blocks {
+      for parameter of block.params { addArrayType(types, parameter.typeName) }
+      for instruction of block.instructions { if instruction.result != none { addArrayType(types, instruction.result!.typeName) } }
+    }
+  }
+  return types
 }
 
 function moduleUsesStringMethod(module_: MinusModule, methodName: string): bool {
@@ -1303,11 +1362,13 @@ export function lowerDoofProgram(program: Program, modulePath: string = "/main.d
     }
   }
   if moduleUsesArrayClass(module_, STRING_CLASS) { injectStringImplementation(module_) }
-  if moduleUsesArrayClass(module_, BYTE_ARRAY_CLASS) {
-    injectPrimitiveArrayImplementation(module_, BYTE_ARRAY_CLASS, "byte", BYTE_ARRAY_DESTRUCTOR)
+  let injectedArrays: string[] = []
+  if moduleUsesArrayClass(module_, BYTE_ARRAY_CLASS) { injectArrayClassRecursively(module_, BYTE_ARRAY_CLASS, injectedArrays) }
+  if moduleUsesArrayClass(module_, CHAR_ARRAY_CLASS) { injectArrayClassRecursively(module_, CHAR_ARRAY_CLASS, injectedArrays) }
+  for arrayClass of usedArrayTypes(module_) {
+    injectArrayClassRecursively(module_, arrayClass, injectedArrays)
   }
-  if moduleUsesArrayClass(module_, CHAR_ARRAY_CLASS) {
-    injectPrimitiveArrayImplementation(module_, CHAR_ARRAY_CLASS, "char", CHAR_ARRAY_DESTRUCTOR)
-  }
+  if moduleUsesArrayClass(module_, BYTE_ARRAY_CLASS) && !injectedArrays.contains(BYTE_ARRAY_CLASS) { injectArrayClassRecursively(module_, BYTE_ARRAY_CLASS, injectedArrays) }
+  if moduleUsesArrayClass(module_, CHAR_ARRAY_CLASS) && !injectedArrays.contains(CHAR_ARRAY_CLASS) { injectArrayClassRecursively(module_, CHAR_ARRAY_CLASS, injectedArrays) }
   return Success(module_)
 }

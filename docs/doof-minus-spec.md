@@ -93,11 +93,11 @@ Supported instructions are:
 | `%r:T = convert %a` | Explicit conversion between numeric types |
 | `%r:T = copy %a` | Copy a value; retains references |
 | `%r:C = new C(%a, ...)` | Allocate a class; arguments follow field order |
-| `%r:int = array-alloc %length, T` | Allocate a primitive array-data block with `length` elements of type `T` |
-| `array-free %handle` | Return an array-data block to the allocator |
+| `%r:int = array-alloc %length, T` | Allocate an array-data block with `length` elements of type `T` |
+| `array-free %handle[, T]` | Release reference elements when `T` is a class, interface, or `any`, then return the block to the allocator |
 | `%r:int = array-length %handle` | Read the array element count |
-| `%r:T = array-get %handle, %index` | Bounds-checked read for primitive type `T` |
-| `array-set %handle, %index, %value` | Bounds-checked primitive write |
+| `%r:T = array-get %handle, %index` | Bounds-checked read; retains class, interface, and `any` values |
+| `array-set %handle, %index, %value` | Bounds-checked write; retains the new reference and releases the replaced reference |
 | `%r:T = get %object.field` | Read a class or interface field |
 | `set %object.field = %value` | Replace a mutable field |
 | `%r:T = call function(%a, ...)` | Direct function call |
@@ -112,10 +112,14 @@ Supported instructions are:
 | `panic` | Trap execution with the Wasm `unreachable` instruction |
 
 Array element types are `bool`, `char`, `byte`, `short`, `int`, `long`, `float`,
-and `double`. Array lengths must be nonnegative, and allocated storage is
-limited to 1024 payload bytes. Negative lengths, oversized allocations, invalid
-handles, and out-of-range indexes trap. These operations are compiler-lowering
-primitives; source Doof code reaches them through generated wrapper classes.
+`double`, enums, `any`, and declared classes or interfaces. Reference elements
+are stored as four-byte pointers. To release a reference array correctly, pass
+its element type to `array-free`, for example `array-free %handle, Widget`; the
+one-argument form remains valid for primitive and enum arrays. Array lengths
+must be nonnegative, and allocated storage is limited to 1024 payload bytes.
+Negative lengths, oversized allocations, invalid handles, and out-of-range
+indexes trap. These operations are compiler-lowering primitives; source Doof
+code reaches them through generated wrapper classes.
 
 Interfaces and `any` cannot be boxed directly; box the concrete class value. A failed `cast` traps. Other invalid runtime operations, such as division by zero, follow Wasm trap behavior. The compiler rejects malformed types, calls, interface implementations, and control-flow edges before emission.
 

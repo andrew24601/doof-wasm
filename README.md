@@ -11,10 +11,12 @@ diagnostics. The CLI resolves imports relative to their importing file. It curre
   supports local bindings, returns, `if`/`else` branches,
   `while` loops, arithmetic and comparisons, calls, fields, class construction,
   interface conversion, integer-backed enums (including distinct enum tags in
-  `any` unions), numeric casts, byte and char arrays, and type aliases
-  whose resolved types are supported by the backend. Both array types support
+  `any` unions), numeric casts, arrays of all supported primitive types and
+  enums, arrays of class and interface references (including strings, nested
+  arrays, and `any` unions), and type aliases
+  whose resolved types are supported by the backend. Supported arrays have
   literals, `.length`, indexed reads and writes, and are limited to 1024
-  elements. Basic strings are represented by an injected string class over a
+  payload bytes. Basic strings are represented by an injected string class over a
   read-only `char[]` wrapper. Distinct string literals are built once when the
   Wasm module starts and shared; `.length`, indexed character reads,
   content-based comparison operators, `.compare(other)`, and
