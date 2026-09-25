@@ -1,7 +1,7 @@
 // Lower checked Doof AST nodes directly into the doof-- model.
 import {
   PrimitiveType, ClassType, EnumType, InterfaceType, ArrayResolvedType, SerialValueResolvedType, NoneType,
-  UnionResolvedType, ResolvedType, FunctionType,
+  UnionResolvedType, ResultResolvedType, SuccessResolvedType, FailureResolvedType, ResolvedType, FunctionType,
 } from "doof/src/semantic"
 import {
   Program, Statement, FunctionDeclaration, ClassDeclaration, InterfaceDeclaration, EnumDeclaration,
@@ -23,6 +23,8 @@ readonly BYTE_ARRAY_DESTRUCTOR = "__doof_array_byte.destroy"
 readonly CHAR_ARRAY_CLASS = "__doof_array_char"
 readonly CHAR_ARRAY_DESTRUCTOR = "__doof_array_char.destroy"
 readonly STRING_CLASS = "__doof_string"
+readonly RESULT_SUCCESS_CLASS = "__doof_result_success"
+readonly RESULT_FAILURE_CLASS = "__doof_result_failure"
 readonly ARRAY_CLASS_PREFIX = "__doof_array_type"
 
 function arrayClassName(elementType: string): string {
@@ -93,6 +95,9 @@ function resolvedName(type_: ResolvedType): string {
       return arrayClassName(elementType)
     }
     _: SerialValueResolvedType -> { return "any" }
+    _: ResultResolvedType -> { return "any" }
+    _: SuccessResolvedType -> { return RESULT_SUCCESS_CLASS }
+    _: FailureResolvedType -> { return RESULT_FAILURE_CLASS }
     union_: UnionResolvedType -> {
       for member of union_.types { if !supportedUnionMember(member) { return "" } }
       return "any"
@@ -664,7 +669,14 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
         return result(context, "call-method", [stringValue, "length"], "int")
       }
       owner := lowerExpression(context, value.object)
-      return result(context, "get", [owner, value.property], typeFromValue(expression))
+      ownerType := typeFromValue(value.object)
+      let fieldType = typeFromValue(expression)
+      if (ownerType == RESULT_SUCCESS_CLASS && value.property == "value") || (ownerType == RESULT_FAILURE_CLASS && value.property == "error") {
+        field := result(context, "get", [owner, value.property], "any")
+        if fieldType == "any" { return field }
+        return result(context, "cast", [field, fieldType], fieldType)
+      }
+      return result(context, "get", [owner, value.property], fieldType)
     }
     value: IndexExpression -> {
       if value.optional { context.failed = "optional array indexing is not supported by doof-wasm"; return "" }
@@ -684,6 +696,29 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
     value: CallExpression -> { return lowerCall(context, value, expression) }
     value: ConstructExpression -> {
       if value.spread != none { context.failed = "construction spreads are not supported by doof-wasm"; return "" }
+      if value.type_ == "Success" || value.type_ == "Failure" {
+        let className = if value.type_ == "Success" then RESULT_SUCCESS_CLASS else RESULT_FAILURE_CLASS
+        let propertyName = if value.type_ == "Success" then "value" else "error"
+        if value.args.length > 1 { context.failed = value.type_ + " construction needs one payload"; return "" }
+        let payload = ""
+        if value.args.length == 1 {
+          argument := value.args[0]
+          if argument.name != "" && argument.name != propertyName {
+            context.failed = value.type_ + " construction payload must be named " + propertyName
+            return ""
+          }
+          if argument.value == none { context.failed = value.type_ + " construction payload is missing"; return "" }
+          argumentValue := argument.value!
+          payload = lowerExpression(context, argumentValue)
+          if context.failed != "" { return "" }
+          if typeFromValue(argumentValue) != "any" { payload = result(context, "box", [payload], "any") }
+        } else {
+          noneValue := result(context, "const", ["none"], "none")
+          payload = result(context, "box", [noneValue], "any")
+        }
+        instance := result(context, "new", [className, payload], className)
+        return result(context, "box", [instance], "any")
+      }
       if value.resolvedClass == none { context.failed = "unresolved class construction"; return "" }
       let args: string[] = [qualifiedName(value.resolvedClass!.resolvedSymbol!.module, value.resolvedClass!.name)]
       for field of value.resolvedClass!.fields {
@@ -1093,6 +1128,45 @@ function moduleUsesArrayClass(module_: MinusModule, arrayClass: string): bool {
   return false
 }
 
+function functionUsesType(function_: MinusFunction, typeName: string): bool {
+  if function_.result == typeName { return true }
+  for parameter of function_.params { if parameter.typeName == typeName { return true } }
+  for block of function_.blocks {
+    for parameter of block.params { if parameter.typeName == typeName { return true } }
+    for instruction of block.instructions {
+      if instruction.result != none && instruction.result!.typeName == typeName { return true }
+      for argument of instruction.args { if argument == typeName { return true } }
+    }
+  }
+  return false
+}
+
+function hasClass(module_: MinusModule, name: string): bool {
+  for class_ of module_.classes { if class_.name == name { return true } }
+  return false
+}
+
+function injectResultClassesIfUsed(module_: MinusModule): none {
+  let successUsed = false
+  let failureUsed = false
+  for function_ of module_.functions {
+    if functionUsesType(function_, RESULT_SUCCESS_CLASS) { successUsed = true }
+    if functionUsesType(function_, RESULT_FAILURE_CLASS) { failureUsed = true }
+  }
+  if successUsed && !hasClass(module_, RESULT_SUCCESS_CLASS) {
+    module_.classes.push(MinusClass {
+      name: RESULT_SUCCESS_CLASS,
+      fields: [MinusField { name: "value", typeName: "any" }],
+    })
+  }
+  if failureUsed && !hasClass(module_, RESULT_FAILURE_CLASS) {
+    module_.classes.push(MinusClass {
+      name: RESULT_FAILURE_CLASS,
+      fields: [MinusField { name: "error", typeName: "any" }],
+    })
+  }
+}
+
 function injectArrayImplementation(module_: MinusModule, arrayClass: string, elementType: string, destructorName: string): none {
   let class_ = MinusClass { name: arrayClass, finalizer: destructorName }
   class_.fields.push(MinusField { name: "data", typeName: "int" })
@@ -1368,6 +1442,7 @@ export function lowerDoofProgram(program: Program, modulePath: string = "/main.d
   for arrayClass of usedArrayTypes(module_) {
     injectArrayClassRecursively(module_, arrayClass, injectedArrays)
   }
+  injectResultClassesIfUsed(module_)
   if moduleUsesArrayClass(module_, BYTE_ARRAY_CLASS) && !injectedArrays.contains(BYTE_ARRAY_CLASS) { injectArrayClassRecursively(module_, BYTE_ARRAY_CLASS, injectedArrays) }
   if moduleUsesArrayClass(module_, CHAR_ARRAY_CLASS) && !injectedArrays.contains(CHAR_ARRAY_CLASS) { injectArrayClassRecursively(module_, CHAR_ARRAY_CLASS, injectedArrays) }
   return Success(module_)

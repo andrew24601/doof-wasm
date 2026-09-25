@@ -76,6 +76,26 @@ export function testCompilesImportedFunctionGraph(): none {
   }
 }
 
+export function testLowersAndExecutesResultArmsAsDoofMinusClasses(): none {
+  source := "export function successValue(): int { result: Result<int, int> := Success { value: 40 }\ncase result { value: Success<int> -> { return value.value }, error: Failure<int> -> { return error.error } } }\n" +
+    "export function failureValue(): int { result: Result<int, int> := Failure { error: 2 }\ncase result { value: Success<int> -> { return value.value }, error: Failure<int> -> { return error.error } } }\n" +
+    "export function main(): int => successValue() + failureValue()"
+  lowered := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  case lowered {
+    success: Success<MinusModule> -> {
+      Assert.equal(success.value.classes.length, 2)
+      Assert.equal(success.value.classes[0].name, "__doof_result_success")
+      Assert.equal(success.value.classes[0].fields[0].name, "value")
+      Assert.equal(success.value.classes[0].fields[0].typeName, "any")
+      Assert.equal(success.value.classes[1].name, "__doof_result_failure")
+      Assert.equal(success.value.classes[1].fields[0].name, "error")
+    }
+    failure: Failure<string> -> { panic(failure.error) }
+  }
+  bytes := try! compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  runWasm(bytes, "result-arms", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.successValue()!==40||e.failureValue()!==2||e.main()!==42)throw new Error("Result arm lowering returned the wrong payload")`)
+}
+
 export function testLowersImportedIntegerEnums(): none {
   result := lowerDoofWasmSources([
     SourceFile { path: "/main.do", source: "import { Kind, getKind } from \"./kinds\"\nexport function main(): int => getKind().value" },

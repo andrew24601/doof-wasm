@@ -17,7 +17,11 @@ the full Doof compiler.
 - `none`, `bool`, `char`, `byte`, `short`, `int`, `long`, `float`, `double`,
   `string`, integer-backed enums, classes, interfaces, `SerialValue`, and union
   types (lowered to doof-- `any`), including aliases that resolve to supported
-  types. Enum tags remain distinct from integer tags inside `any` unions.
+  types. `Result<T, E>` is represented as an `any` union of `Success<T>` and
+  `Failure<E>`; those arms lower to concrete doof-- classes whose `value` and
+  `error` fields hold boxed payloads. Type captures recover the payload's
+  checked type when reading those fields. Enum tags remain distinct from
+  integer tags inside `any` unions.
 - Mutable and read-only arrays of `bool`, `char`, `byte`, `short`, `int`,
   `long`, `float`, `double`, enums, class and interface references, and `any`
   unions. This includes strings and nested arrays when their element types are
