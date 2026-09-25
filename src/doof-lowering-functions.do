@@ -1,15 +1,15 @@
 // Lower checked function bodies, expressions, control flow, and lambdas.
 import {
   PrimitiveType, ClassType, EnumType, ArrayResolvedType, SerialValueResolvedType, NoneType,
-  UnionResolvedType, ResultResolvedType, SuccessResolvedType, FailureResolvedType, ResolvedType, FunctionType,
+  UnionResolvedType, ResultResolvedType, SuccessResolvedType, FailureResolvedType, WeakResolvedType, ResolvedType, FunctionType,
 } from "doof/src/semantic"
 import {
   Statement, FunctionDeclaration, EnumDeclaration, Expression, Block, ReturnStatement, ImmutableBinding, LetDeclaration,
   ReadonlyDeclaration, ExpressionStatement, IntLiteral, LongLiteral, FloatLiteral, DoubleLiteral, StringLiteral,
   CharLiteral, BoolLiteral, NoneLiteral, Identifier, BinaryExpression, UnaryExpression, AssignmentExpression,
   CallExpression, MemberExpression, ConstructExpression, ArrayLiteral, IndexExpression, AsExpression, ThisExpression,
-  DotShorthand, IfStatement, IfBranch, CaseStatement, TypePattern, ValuePattern, WildcardPattern, WhileStatement,
-  LambdaExpression,
+  DotShorthand, IfStatement, IfBranch, IfExpression, CaseStatement, TypePattern, ValuePattern, WildcardPattern, WhileStatement,
+  ForStatement, ForOfStatement, LambdaExpression,
 } from "doof/src/ast"
 import { collectNestedExpressions, collectBlockExpressions } from "doof/src/ast-walk"
 import {
@@ -108,6 +108,156 @@ function lowerWhile(context: FunctionLowering, statement: WhileStatement): none 
   appendContext(context, bodyContext)
   appendContext(context, exitContext)
   for binding of latestLocals(exitContext) { context.bindings.push(binding) }
+  context.terminated = exitContext.terminated
+}
+
+// Source loops use explicit header, body, and exit blocks; future break/continue
+// edges can target those blocks while preserving the same carried local values.
+function lowerFor(context: FunctionLowering, statement: ForStatement): none {
+  if statement.label != none { context.failed = "labeled loops are not supported by doof-wasm yet"; return }
+  if statement.then_ != none { context.failed = "for-else clauses are not supported by doof-wasm yet"; return }
+  if statement.init != none { lowerStatements(context, [statement.init!]) }
+  if context.failed != "" || context.terminated { return }
+  locals := latestLocals(context)
+  id := context.nextBlock
+  context.nextBlock = context.nextBlock + 1
+  conditionName := "for_cond" + string(id)
+  bodyName := "for_body" + string(id)
+  exitName := "for_exit" + string(id)
+  effect(context, "jump", concatValues([conditionName], bindingValues(context, locals)))
+  conditionContext := blockContext(context, locals, id, "c", conditionName)
+  condition := if statement.condition == none then result(conditionContext, "const", ["true"], "bool") else lowerExpression(conditionContext, statement.condition!)
+  if conditionContext.failed != "" { context.failed = conditionContext.failed; return }
+  edgeValues := bindingValues(conditionContext, locals)
+  let branchArgs: string[] = [condition, bodyName]
+  for value of edgeValues { branchArgs.push(value) }
+  branchArgs.push("|"); branchArgs.push(exitName)
+  for value of edgeValues { branchArgs.push(value) }
+  effect(conditionContext, "branch", branchArgs)
+
+  bodyContext := blockContext(conditionContext, locals, id, "f", bodyName)
+  lowerStatements(bodyContext, statement.body.statements)
+  if bodyContext.failed != "" { context.failed = bodyContext.failed; return }
+  if !bodyContext.terminated {
+    for update of statement.update { _ := lowerExpression(bodyContext, update); if bodyContext.failed != "" { context.failed = bodyContext.failed; return } }
+    effect(bodyContext, "jump", concatValues([conditionName], bindingValues(bodyContext, locals)))
+  }
+  exitContext := blockContext(conditionContext, locals, id, "x", exitName)
+  exitContext.nextValue = bodyContext.nextValue
+  exitContext.nextBlock = bodyContext.nextBlock
+  appendContext(context, conditionContext)
+  appendContext(context, bodyContext)
+  appendContext(context, exitContext)
+  for binding of latestLocals(exitContext) { context.bindings.push(binding) }
+  context.terminated = exitContext.terminated
+}
+
+function lowerForOf(context: FunctionLowering, statement: ForOfStatement): none {
+  if statement.label != none { context.failed = "labeled loops are not supported by doof-wasm yet"; return }
+  if statement.then_ != none { context.failed = "for-of-else clauses are not supported by doof-wasm yet"; return }
+  if statement.bindings.length > 1 { context.failed = "for-of destructuring is not supported by doof-wasm yet"; return }
+  let isRange = false
+  case statement.iterable {
+    range: BinaryExpression -> { isRange = range.operator == "..<" || range.operator == ".." }
+    _ -> { }
+  }
+  let elementType = ""
+  if isRange { elementType = "int" }
+  else if statement.iterable.resolvedType != none {
+    case statement.iterable.resolvedType! {
+      array: ArrayResolvedType -> { elementType = resolvedName(array.elementType) }
+      _ -> { }
+    }
+  }
+  if elementType == "" || statement.iterable.resolvedType == none {
+    context.failed = "for-of currently supports arrays and integer ranges in doof-wasm"
+    return
+  }
+
+  // Keep the iterable and cursor as loop-carried values so both are evaluated once.
+  id := context.nextBlock
+  context.nextBlock = context.nextBlock + 1
+  let iterableName = "%doof_for_iterable_" + string(id)
+  let cursorName = "%doof_for_cursor_" + string(id)
+  let iterableValue = ""
+  let endValue = ""
+  let startValue = ""
+  if isRange {
+    case statement.iterable {
+      range: BinaryExpression -> {
+        startValue = lowerExpression(context, range.left)
+        endValue = lowerExpression(context, range.right)
+      }
+      _ -> { }
+    }
+  } else {
+    iterableValue = lowerExpression(context, statement.iterable)
+  }
+  if context.failed != "" { return }
+  let originalBindings: SourceBinding[] = []
+  for binding of context.bindings { originalBindings.push(binding) }
+  let carried = latestLocals(context)
+  if isRange { context.bindings.push(SourceBinding { name: iterableName, typeName: "int", valueName: endValue }) }
+  else { context.bindings.push(SourceBinding { name: iterableName, typeName: typeFromValue(statement.iterable), valueName: iterableValue }) }
+  zero := if isRange then startValue else result(context, "const", ["0"], "int")
+  context.bindings.push(SourceBinding { name: cursorName, typeName: "int", valueName: zero, mutable: true })
+  for binding of latestLocals(context) { if binding.name == iterableName || binding.name == cursorName { carried.push(binding) } }
+
+  conditionName := "for_of_cond" + string(id)
+  bodyName := "for_of_body" + string(id)
+  exitName := "for_of_exit" + string(id)
+  effect(context, "jump", concatValues([conditionName], bindingValues(context, carried)))
+  conditionContext := blockContext(context, carried, id, "c", conditionName)
+  cursor := findBinding(conditionContext, cursorName)!
+  let limit = if isRange then findBinding(conditionContext, iterableName)!.valueName else endValue
+  if !isRange {
+    array := findBinding(conditionContext, iterableName)!.valueName
+    limit = result(conditionContext, "call-method", [array, "length"], "int")
+  }
+  let condition = ""
+  if isRange {
+    case statement.iterable {
+      range: BinaryExpression -> {
+        if range.operator == ".." {
+          above := result(conditionContext, "lt", [limit, cursor.valueName], "bool")
+          no := result(conditionContext, "const", ["false"], "bool")
+          condition = result(conditionContext, "eq", [above, no], "bool")
+        } else { condition = result(conditionContext, "lt", [cursor.valueName, limit], "bool") }
+      }
+      _ -> { }
+    }
+  } else { condition = result(conditionContext, "lt", [cursor.valueName, limit], "bool") }
+  edgeValues := bindingValues(conditionContext, carried)
+  let branchArgs: string[] = [condition, bodyName]
+  for value of edgeValues { branchArgs.push(value) }
+  branchArgs.push("|"); branchArgs.push(exitName)
+  for value of edgeValues { branchArgs.push(value) }
+  effect(conditionContext, "branch", branchArgs)
+
+  bodyContext := blockContext(conditionContext, carried, id, "b", bodyName)
+  bodyCursor := findBinding(bodyContext, cursorName)!
+  bodyIterable := findBinding(bodyContext, iterableName)!
+  item := if isRange then bodyCursor.valueName else result(bodyContext, "call-method", [bodyIterable.valueName, "get", bodyCursor.valueName], elementType)
+  if statement.bindings.length == 1 && statement.bindings[0] != "_" {
+    bodyContext.bindings.push(SourceBinding { name: statement.bindings[0], typeName: elementType, valueName: item })
+  }
+  lowerStatements(bodyContext, statement.body.statements)
+  if bodyContext.failed != "" { context.failed = bodyContext.failed; return }
+  if !bodyContext.terminated {
+    currentCursor := findBinding(bodyContext, cursorName)!
+    one := result(bodyContext, "const", ["1"], "int")
+    nextCursor := result(bodyContext, "add", [currentCursor.valueName, one], "int")
+    bodyContext.bindings.push(SourceBinding { name: cursorName, typeName: "int", valueName: nextCursor, mutable: true })
+    effect(bodyContext, "jump", concatValues([conditionName], bindingValues(bodyContext, carried)))
+  }
+  exitContext := blockContext(conditionContext, carried, id, "x", exitName)
+  exitContext.nextValue = bodyContext.nextValue
+  exitContext.nextBlock = bodyContext.nextBlock
+  appendContext(context, conditionContext)
+  appendContext(context, bodyContext)
+  appendContext(context, exitContext)
+  while context.bindings.length > originalBindings.length { ignored := try! context.bindings.pop() }
+  for binding of latestLocals(exitContext) { if binding.name != iterableName && binding.name != cursorName { context.bindings.push(binding) } }
   context.terminated = exitContext.terminated
 }
 
@@ -457,6 +607,11 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
     value: CharLiteral -> { return result(context, "const", [string(int(value.value))], "char") }
     value: BoolLiteral -> { return result(context, "const", [if value.value then "true" else "false"], "bool") }
     _: NoneLiteral -> { return result(context, "const", ["none"], "none") }
+    value: IfExpression -> {
+      condition := lowerExpression(context, value.condition)
+      if context.failed != "" { return "" }
+      return lowerConditionalValue(context, condition, value.then_, value.else_, typeFromValue(expression), "if_value")
+    }
     value: Identifier -> {
       binding := findBinding(context, value.name)
       if binding == none { context.failed = "unsupported global value " + value.name; return "" }
@@ -469,6 +624,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       return binding!.valueName
     }
     value: BinaryExpression -> {
+      if value.operator == "??" { return lowerCoalesce(context, value, expression) }
       if !["+", "-", "*", "/", "==", "<", "!=", ">", "<=", ">="].contains(value.operator) {
         context.failed = "operator " + value.operator + " is not supported by doof-wasm"; return ""
       }
@@ -591,7 +747,10 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       return ""
     }
     value: MemberExpression -> {
-      if value.optional || value.force { context.failed = "optional member access is not supported by doof-wasm"; return "" }
+      if value.optional && hasNoneType(value.object.resolvedType) {
+        return lowerOptionalMember(context, value, expression)
+      }
+      if value.force || (value.optional && hasWeakType(value.object.resolvedType)) { context.failed = "weak-reference member access is not supported by doof-wasm"; return "" }
       if value.property == "value" && isEnumType(value.object.resolvedType) {
         enumValue := lowerExpression(context, value.object)
         return result(context, "convert", [enumValue], typeFromValue(expression))
@@ -627,14 +786,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
         return result(context, "call-method", [stringValue, "length"], "int")
       }
       owner := lowerExpression(context, value.object)
-      ownerType := typeFromValue(value.object)
-      let fieldType = typeFromValue(expression)
-      if (ownerType == RESULT_SUCCESS_CLASS && value.property == "value") || (ownerType == RESULT_FAILURE_CLASS && value.property == "error") {
-        field := result(context, "get", [owner, value.property], "any")
-        if fieldType == "any" { return field }
-        return result(context, "cast", [field, fieldType], fieldType)
-      }
-      return result(context, "get", [owner, value.property], fieldType)
+      return lowerMemberOnOwner(context, value, owner)
     }
     value: IndexExpression -> {
       if value.optional { context.failed = "optional array indexing is not supported by doof-wasm"; return "" }
@@ -710,6 +862,274 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
   }
 }
 
+function lowerOptionalMember(context: FunctionLowering, value: MemberExpression, expression: Expression): string {
+  object := lowerExpression(context, value.object)
+  if context.failed != "" { return "" }
+  missing := result(context, "is", [object, "none"], "bool")
+  locals := latestLocals(context)
+  id := context.nextBlock
+  context.nextBlock = context.nextBlock + 1
+  missingName := "optional_member_none" + string(id)
+  presentName := "optional_member_value" + string(id)
+  joinName := "optional_member_join" + string(id)
+  let args: string[] = [missing, missingName]
+  for localValue of bindingValues(context, locals) { args.push(localValue) }
+  args.push(object); args.push("|"); args.push(presentName)
+  for localValue of bindingValues(context, locals) { args.push(localValue) }
+  args.push(object)
+  effect(context, "branch", args)
+  noneContext := blockContext(context, locals, id, "n", missingName)
+  presentContext := blockContext(context, locals, id, "p", presentName)
+  noneContext.currentLine = expression.span.start.line
+  presentContext.currentLine = expression.span.start.line
+  objectTypeName := typeFromValue(value.object)
+  noneOwner := "%b" + string(id) + "n" + string(locals.length)
+  presentOwner := "%b" + string(id) + "p" + string(locals.length)
+  noneContext.currentBlock.params.push(MinusValue { name: noneOwner, typeName: objectTypeName })
+  presentContext.currentBlock.params.push(MinusValue { name: presentOwner, typeName: objectTypeName })
+  resultType := typeFromValue(expression)
+  noneValue := result(noneContext, "const", ["none"], "none")
+  if resultType == "any" { noneValue = result(noneContext, "box", [noneValue], "any") }
+  presentContext.nextValue = noneContext.nextValue
+  presentObjectType := nonNoneTypeName(value.object.resolvedType)
+  if presentObjectType == "" || presentObjectType == "any" {
+    context.failed = "optional member access needs one concrete non-none receiver type"
+    return ""
+  }
+  presentTypedOwner := result(presentContext, "cast", [presentOwner, presentObjectType], presentObjectType)
+  presentValue := lowerMemberOnOwner(presentContext, value, presentTypedOwner)
+  actualMemberType := memberValueTypeName(value)
+  if resultType == "any" && actualMemberType != "any" {
+    presentValue = result(presentContext, "box", [presentValue], "any")
+  }
+  if presentContext.failed != "" { context.failed = presentContext.failed; return "" }
+  let joinParams: MinusValue[] = []
+  for index of 0..<locals.length {
+    storageType := if locals[index].boxedTypeName == "" then locals[index].typeName else locals[index].boxedTypeName
+    joinParams.push(MinusValue { name: "%b" + string(id) + "j" + string(index), typeName: storageType })
+  }
+  joined := "%b" + string(id) + "j" + string(locals.length)
+  joinParams.push(MinusValue { name: joined, typeName: resultType })
+  effect(noneContext, "jump", concatValues([joinName], concatValues(bindingValues(noneContext, locals), [noneValue])))
+  effect(presentContext, "jump", concatValues([joinName], concatValues(bindingValues(presentContext, locals), [presentValue])))
+  appendContext(context, noneContext)
+  appendContext(context, presentContext)
+  context.currentBlock = MinusBlock { name: joinName, params: joinParams, sourcePath: context.sourcePath }
+  context.blocks.push(context.currentBlock)
+  for index of 0..<locals.length {
+    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
+  }
+  context.terminated = false
+  return joined
+}
+
+function lowerMemberOnOwner(context: FunctionLowering, value: MemberExpression, owner: string): string {
+  ownerType := nonNoneTypeName(value.object.resolvedType)
+  fieldType := memberValueTypeName(value)
+  if value.property == "value" && isEnumType(nonNoneResolvedType(value.object.resolvedType)) {
+    return result(context, "convert", [owner], fieldType)
+  }
+  if value.property == "length" && isArrayClass(ownerType) {
+    return result(context, "call-method", [owner, "length"], "int")
+  }
+  if value.property == "length" && ownerType == STRING_CLASS {
+    return result(context, "call-method", [owner, "length"], "int")
+  }
+  if (ownerType == RESULT_SUCCESS_CLASS && value.property == "value") || (ownerType == RESULT_FAILURE_CLASS && value.property == "error") {
+    field := result(context, "get", [owner, value.property], "any")
+    if fieldType == "any" { return field }
+    return result(context, "cast", [field, fieldType], fieldType)
+  }
+  return result(context, "get", [owner, value.property], fieldType)
+}
+
+function memberValueTypeName(value: MemberExpression): string {
+  if value.resolvedMember == none || value.resolvedMember!.type_ == none { return "" }
+  return resolvedName(value.resolvedMember!.type_!)
+}
+
+function nonNoneTypeName(type_: ResolvedType | none): string {
+  if type_ == none { return "" }
+  case type_! {
+    union_: UnionResolvedType -> {
+      let present = ""
+      for member of union_.types {
+        if member.kind == "none" { continue }
+        name := resolvedName(member)
+        if present == "" { present = name }
+        else if present != name { return "any" }
+      }
+      return present
+    }
+    _ -> { return resolvedName(type_!) }
+  }
+}
+
+function hasNoneType(type_: ResolvedType | none): bool {
+  if type_ == none { return false }
+  case type_! {
+    _: NoneType -> { return true }
+    union_: UnionResolvedType -> { for member of union_.types { if member.kind == "none" { return true } } }
+    _ -> { }
+  }
+  return false
+}
+
+function hasWeakType(type_: ResolvedType | none): bool {
+  if type_ == none { return false }
+  case type_! {
+    _: WeakResolvedType -> { return true }
+    union_: UnionResolvedType -> { for member of union_.types { if member.kind == "weak" { return true } } }
+    _ -> { }
+  }
+  return false
+}
+
+function lowerConditionalValue(context: FunctionLowering, condition: string, yesExpression: Expression, noExpression: Expression, resultType: string, prefix: string): string {
+  locals := latestLocals(context)
+  id := context.nextBlock
+  context.nextBlock = context.nextBlock + 1
+  yesName := prefix + "_yes" + string(id)
+  noName := prefix + "_no" + string(id)
+  joinName := prefix + "_join" + string(id)
+  let branchArgs: string[] = [condition, yesName]
+  for value of bindingValues(context, locals) { branchArgs.push(value) }
+  branchArgs.push("|"); branchArgs.push(noName)
+  for value of bindingValues(context, locals) { branchArgs.push(value) }
+  effect(context, "branch", branchArgs)
+
+  yesContext := blockContext(context, locals, id, "y", yesName)
+  noContext := blockContext(context, locals, id, "n", noName)
+  yesContext.currentLine = context.currentLine
+  noContext.currentLine = context.currentLine
+  yesValue := lowerExpected(yesContext, yesExpression, resultType)
+  noContext.nextValue = yesContext.nextValue
+  noContext.nextBlock = yesContext.nextBlock
+  noValue := lowerExpected(noContext, noExpression, resultType)
+  if yesContext.failed != "" { context.failed = yesContext.failed; return "" }
+  if noContext.failed != "" { context.failed = noContext.failed; return "" }
+
+  yesFlows := !yesContext.terminated
+  noFlows := !noContext.terminated
+  if !yesFlows && !noFlows {
+    appendContext(context, yesContext)
+    appendContext(context, noContext)
+    context.terminated = true
+    return ""
+  }
+
+  let joinParams: MinusValue[] = []
+  for index of 0..<locals.length {
+    storageType := if locals[index].boxedTypeName == "" then locals[index].typeName else locals[index].boxedTypeName
+    joinParams.push(MinusValue { name: "%b" + string(id) + "j" + string(index), typeName: storageType })
+  }
+  valueName := "%b" + string(id) + "j" + string(locals.length)
+  joinParams.push(MinusValue { name: valueName, typeName: resultType })
+  if yesFlows { effect(yesContext, "jump", concatValues([joinName], concatValues(bindingValues(yesContext, locals), [yesValue]))) }
+  if noFlows { effect(noContext, "jump", concatValues([joinName], concatValues(bindingValues(noContext, locals), [noValue]))) }
+
+  appendContext(context, yesContext)
+  appendContext(context, noContext)
+  context.currentBlock = MinusBlock { name: joinName, params: joinParams, sourcePath: context.sourcePath }
+  context.blocks.push(context.currentBlock)
+  for index of 0..<locals.length {
+    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
+  }
+  context.terminated = false
+  return valueName
+}
+
+function lowerCoalesce(context: FunctionLowering, value: BinaryExpression, expression: Expression): string {
+  let presentType = ""
+  leftType := value.left.resolvedType
+  if leftType == none { context.failed = "operator ?? left operand has no resolved type"; return "" }
+  if leftType!.kind == "none" {
+    _ := lowerExpression(context, value.left)
+    if context.failed != "" { return "" }
+    return lowerExpected(context, value.right, typeFromValue(expression))
+  }
+  case leftType! {
+    resultType_: ResultResolvedType -> { presentType = resolvedName(resultType_.valueType) }
+    union_: UnionResolvedType -> {
+      for member of union_.types {
+        case member {
+          _: NoneType -> { }
+          _ -> {
+            memberType := resolvedName(member)
+            if presentType == "" { presentType = memberType }
+            else if presentType != memberType { presentType = "any" }
+          }
+        }
+      }
+    }
+    _: NoneType -> { presentType = "none" }
+    _ -> { }
+  }
+  if presentType == "" { context.failed = "operator ?? needs a supported optional or Result value"; return "" }
+  left := lowerExpression(context, value.left)
+  if context.failed != "" { return "" }
+  let missing: string
+  if leftType!.kind == "result" {
+    missing = result(context, "is", [left, RESULT_FAILURE_CLASS], "bool")
+  } else {
+    missing = result(context, "is", [left, "none"], "bool")
+  }
+  locals := latestLocals(context)
+  id := context.nextBlock
+  context.nextBlock = context.nextBlock + 1
+  // Branch to the fallback for a missing value; otherwise extract the payload.
+  localsValues := bindingValues(context, locals)
+  fallbackName := "coalesce_fallback" + string(id)
+  presentName := "coalesce_present" + string(id)
+  joinName := "coalesce_join" + string(id)
+  let branchArgs: string[] = [missing, fallbackName]
+  for localValue of localsValues { branchArgs.push(localValue) }
+  branchArgs.push(left)
+  branchArgs.push("|"); branchArgs.push(presentName)
+  for localValue of localsValues { branchArgs.push(localValue) }
+  branchArgs.push(left)
+  effect(context, "branch", branchArgs)
+  fallbackContext := blockContext(context, locals, id, "f", fallbackName)
+  presentContext := blockContext(context, locals, id, "p", presentName)
+  fallbackContext.currentLine = expression.span.start.line
+  presentContext.currentLine = expression.span.start.line
+  // Carry the already evaluated left value as a block parameter to avoid reevaluating it.
+  leftParamName := "%b" + string(id) + "p" + string(locals.length)
+  fallbackContext.currentBlock.params.push(MinusValue { name: "%b" + string(id) + "f" + string(locals.length), typeName: typeFromValue(value.left) })
+  presentContext.currentBlock.params.push(MinusValue { name: leftParamName, typeName: typeFromValue(value.left) })
+  fallbackResult := lowerExpected(fallbackContext, value.right, typeFromValue(expression))
+  presentContext.nextValue = fallbackContext.nextValue
+  presentResult := leftParamName
+  if leftType!.kind == "result" {
+    presentResult = result(presentContext, "get", [leftParamName, "value"], "any")
+    if presentType != "any" { presentResult = result(presentContext, "cast", [presentResult, presentType], presentType) }
+  } else if presentType != "any" {
+    presentResult = result(presentContext, "cast", [leftParamName, presentType], presentType)
+  }
+  resultType := typeFromValue(expression)
+  if resultType == "any" && presentType != "any" { presentResult = result(presentContext, "box", [presentResult], "any") }
+  if fallbackContext.failed != "" { context.failed = fallbackContext.failed; return "" }
+  if presentContext.failed != "" { context.failed = presentContext.failed; return "" }
+  let joinParams: MinusValue[] = []
+  for index of 0..<locals.length {
+    storageType := if locals[index].boxedTypeName == "" then locals[index].typeName else locals[index].boxedTypeName
+    joinParams.push(MinusValue { name: "%b" + string(id) + "j" + string(index), typeName: storageType })
+  }
+  resultName := "%b" + string(id) + "j" + string(locals.length)
+  joinParams.push(MinusValue { name: resultName, typeName: resultType })
+  effect(fallbackContext, "jump", concatValues([joinName], concatValues(bindingValues(fallbackContext, locals), [fallbackResult])))
+  effect(presentContext, "jump", concatValues([joinName], concatValues(bindingValues(presentContext, locals), [presentResult])))
+  appendContext(context, fallbackContext)
+  appendContext(context, presentContext)
+  context.currentBlock = MinusBlock { name: joinName, params: joinParams, sourcePath: context.sourcePath }
+  context.blocks.push(context.currentBlock)
+  for index of 0..<locals.length {
+    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
+  }
+  context.terminated = false
+  return resultName
+}
+
 function lowerTryOperator(context: FunctionLowering, operation: UnaryExpression, expression: Expression): string {
   operand := lowerExpression(context, operation.operand)
   if context.failed != "" { return "" }
@@ -768,7 +1188,7 @@ function lowerTryOperator(context: FunctionLowering, operation: UnaryExpression,
   resultType := typeFromValue(expression)
   effect(successContext, "jump", concatValues([joinName], concatValues(bindingValues(successContext, locals), [payload])))
 
-  joinParams: MinusValue[] = []
+  let joinParams: MinusValue[] = []
   for index of 0..<locals.length {
     storageType := if locals[index].boxedTypeName == "" then locals[index].typeName else locals[index].boxedTypeName
     joinParams.push(MinusValue { name: "%b" + string(id) + "j" + string(index), typeName: storageType })
@@ -840,6 +1260,14 @@ function lowerCall(context: FunctionLowering, call: CallExpression, expression: 
       if context.failed != "" { return "" }
     }
     return result(context, "new", args, typeFromValue(expression))
+  }
+  case call.callee {
+    member: MemberExpression -> {
+      if member.optional && hasNoneType(member.object.resolvedType) {
+        return lowerOptionalCall(context, call, member, expression)
+      }
+    }
+    _ -> { }
   }
   let receiver = ""
   let closureCall = false
@@ -913,9 +1341,108 @@ function lowerCall(context: FunctionLowering, call: CallExpression, expression: 
       if typeFromValue(callee.object) == STRING_CLASS && callee.property == "substring" && args.length == 1 {
         args.push(result(context, "call-method", [receiver, "length"], "int"))
       }
-      return result(context, "call-method", concatValues([receiver, callee.property], args), typeFromValue(expression))
+      return result(context, "call-method", concatValues([receiver, callee.property], args), callResultTypeName(call, expression))
     }
     _ -> { context.failed = "call target is not supported by doof-wasm"; return "" }
+  }
+}
+
+function lowerOptionalCall(context: FunctionLowering, call: CallExpression, member: MemberExpression, expression: Expression): string {
+  object := lowerExpression(context, member.object)
+  if context.failed != "" { return "" }
+  missing := result(context, "is", [object, "none"], "bool")
+  locals := latestLocals(context)
+  id := context.nextBlock
+  context.nextBlock = context.nextBlock + 1
+  noneName := "optional_call_none" + string(id)
+  invokeName := "optional_call_invoke" + string(id)
+  joinName := "optional_call_join" + string(id)
+  let branchArgs: string[] = [missing, noneName]
+  for localValue of bindingValues(context, locals) { branchArgs.push(localValue) }
+  branchArgs.push(object); branchArgs.push("|"); branchArgs.push(invokeName)
+  for localValue of bindingValues(context, locals) { branchArgs.push(localValue) }
+  branchArgs.push(object)
+  effect(context, "branch", branchArgs)
+  noneContext := blockContext(context, locals, id, "n", noneName)
+  invokeContext := blockContext(context, locals, id, "c", invokeName)
+  noneContext.currentLine = expression.span.start.line
+  invokeContext.currentLine = expression.span.start.line
+  receiverType := nonNoneResolvedType(member.object.resolvedType)
+  receiverTypeName := if receiverType == none then "" else resolvedName(receiverType!)
+  if receiverTypeName == "" || receiverTypeName == "any" {
+    context.failed = "optional method access needs one concrete non-none receiver type"
+    return ""
+  }
+  noneOwner := "%b" + string(id) + "n" + string(locals.length)
+  invokeOwner := "%b" + string(id) + "c" + string(locals.length)
+  noneContext.currentBlock.params.push(MinusValue { name: noneOwner, typeName: typeFromValue(member.object) })
+  invokeContext.currentBlock.params.push(MinusValue { name: invokeOwner, typeName: typeFromValue(member.object) })
+  resultType := typeFromValue(expression)
+  noneValue := result(noneContext, "const", ["none"], "none")
+  if resultType == "any" { noneValue = result(noneContext, "box", [noneValue], "any") }
+  invokeContext.nextValue = noneContext.nextValue
+  typedOwner := result(invokeContext, "cast", [invokeOwner, receiverTypeName], receiverTypeName)
+  syntheticName := "__optional_receiver_" + string(id)
+  synthetic := Identifier { kind: "identifier", name: syntheticName, resolvedType: receiverType!, span: member.object.span }
+  previousObject := member.object
+  previousOptional := member.optional
+  member.object = synthetic
+  member.optional = false
+  invokeContext.bindings.push(SourceBinding { name: syntheticName, typeName: receiverTypeName, valueName: typedOwner })
+  invoked := lowerCall(invokeContext, call, expression)
+  member.object = previousObject
+  member.optional = previousOptional
+  invokedType := callResultTypeName(call, expression)
+  if resultType == "any" && invokedType != "any" { invoked = result(invokeContext, "box", [invoked], "any") }
+  if invokeContext.failed != "" { context.failed = invokeContext.failed; return "" }
+  let joinParams: MinusValue[] = []
+  for index of 0..<locals.length {
+    storageType := if locals[index].boxedTypeName == "" then locals[index].typeName else locals[index].boxedTypeName
+    joinParams.push(MinusValue { name: "%b" + string(id) + "j" + string(index), typeName: storageType })
+  }
+  joined := "%b" + string(id) + "j" + string(locals.length)
+  joinParams.push(MinusValue { name: joined, typeName: resultType })
+  effect(noneContext, "jump", concatValues([joinName], concatValues(bindingValues(noneContext, locals), [noneValue])))
+  effect(invokeContext, "jump", concatValues([joinName], concatValues(bindingValues(invokeContext, locals), [invoked])))
+  appendContext(context, noneContext)
+  appendContext(context, invokeContext)
+  context.currentBlock = MinusBlock { name: joinName, params: joinParams, sourcePath: context.sourcePath }
+  context.blocks.push(context.currentBlock)
+  for index of 0..<locals.length {
+    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
+  }
+  context.terminated = false
+  return joined
+}
+
+function callResultTypeName(call: CallExpression, expression: Expression): string {
+  case call.callee {
+    member: MemberExpression -> {
+      if member.resolvedMember != none && member.resolvedMember!.type_ != none {
+        case member.resolvedMember!.type_! {
+          function_: FunctionType -> { return resolvedName(function_.returnType) }
+          _ -> { }
+        }
+      }
+    }
+    _ -> { }
+  }
+  return typeFromValue(expression)
+}
+
+function nonNoneResolvedType(type_: ResolvedType | none): ResolvedType | none {
+  if type_ == none { return none }
+  case type_! {
+    union_: UnionResolvedType -> {
+      let present: ResolvedType | none = none
+      for member of union_.types {
+        if member.kind == "none" { continue }
+        if present != none && resolvedName(present!) != resolvedName(member) { return none }
+        present = member
+      }
+      return present
+    }
+    _ -> { return type_ }
   }
 }
 
@@ -1054,6 +1581,8 @@ function lowerStatements(context: FunctionLowering, statements: Statement[]): no
       value: IfStatement -> { lowerIf(context, value) }
       value: CaseStatement -> { lowerCaseStatement(context, value) }
       value: WhileStatement -> { lowerWhile(context, value) }
+      value: ForStatement -> { lowerFor(context, value) }
+      value: ForOfStatement -> { lowerForOf(context, value) }
       _ -> { context.failed = "statement is not supported by doof-wasm"; return }
     }
   }

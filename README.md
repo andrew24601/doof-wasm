@@ -11,7 +11,9 @@ diagnostics. Lambda values lower to generated interfaces and classes; immutable
 local captures are copied into the generated class, while mutable captures use
 a shared mutable cell so writes from either side remain visible. The CLI resolves imports relative to their importing file. It currently
   supports local bindings, returns, `if`/`else` branches,
-  `while` loops, arithmetic and comparisons, calls, fields, class construction,
+  `while` and C-style `for` loops, `for-of` over arrays and integer ranges,
+  value `if` expressions, `?.` member and method access on nullable receivers,
+  `??` coalescing, arithmetic and comparisons, calls, fields, class construction,
   interface conversion, integer-backed enums (including distinct enum tags in
   `any` unions), numeric casts, arrays of all supported primitive types and
   enums, arrays of class and interface references (including strings, nested
@@ -26,7 +28,8 @@ a shared mutable cell so writes from either side remain visible. The CLI resolve
   `.substring(start[, end])` are supported. String interpolation and other
   string methods are not supported yet. Other collection values are not
   supported by lowering yet.
-Generics, string-backed enums, and loop labels, `break`, or `continue` are not supported yet.
+Generics, string-backed enums, loop labels, `break`, `continue`, and loop `else`
+clauses are not supported yet.
 
 ```sh
 doof run src/doof-cli.do -- example.do example.wasm

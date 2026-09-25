@@ -41,7 +41,11 @@ the full Doof compiler.
   `from "module"` selects a Wasm import namespace.
 - Local `let`, `readonly`, and inferred immutable bindings; returns; `if`,
   `if`/`else`, and `else if` branches that rejoin; union `case` statements with
-  type captures, `none`, and wildcard arms; and `while` loops.
+  type captures, `none`, and wildcard arms; `while` loops; C-style `for` loops;
+  and `for-of` loops over supported arrays and integer ranges. Array iterables
+  and range endpoints are evaluated once per loop entry.
+- Value `if` expressions, `??` for nullable and `Result` values, and `?.`
+  member or method access that propagates `none` from a nullable receiver.
 - Function values lower to generated `__closure_<result>_<arg>...` interfaces
   and one class per lambda. Lambdas can capture immutable locals by copying
   them into immutable fields. Mutable `let` captures share a generated cell
@@ -64,8 +68,8 @@ or loop edges are passed as block arguments.
 ## Not supported yet
 
 Imports and multiple source files, generics, string-backed enums, arrays whose
-element type is unsupported by doof--, labeled loops, `break`, `continue`, while-else
-clauses, static members, weak references, case expressions,
+element type is unsupported by doof--, labeled loops, `break`, `continue`, loop-else
+clauses, for-of destructuring, map/set/stream iteration, static members, weak references, case expressions,
 value/range patterns, and multiple patterns per case arm,
 async code, compound assignments, nested lexical blocks, and other source expressions. The doof-- backend
 already supports more control flow and runtime operations; the source lowering
