@@ -13,6 +13,7 @@ export class SourceBinding {
   valueName: string
   parameter: bool = false
   mutable: bool = false
+  boxedTypeName: string = ""
 }
 
 export class FunctionLowering {
@@ -173,8 +174,9 @@ export function blockContext(parent: FunctionLowering, locals: SourceBinding[], 
   child.nextBlock = parent.nextBlock
   for index of 0..<locals.length {
     valueName := "%b" + string(id) + suffix + string(index)
-    params.push(MinusValue { name: valueName, typeName: locals[index].typeName })
-    child.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName, mutable: locals[index].mutable })
+    storageType := if locals[index].boxedTypeName == "" then locals[index].typeName else locals[index].boxedTypeName
+    params.push(MinusValue { name: valueName, typeName: storageType })
+    child.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
   }
   child.sourcePath = parent.sourcePath
   child.module_ = parent.module_

@@ -104,6 +104,7 @@ Supported instructions are:
 | `%r:T = call %object.method(%a, ...)` | Class call or dynamic interface dispatch |
 | `%r:I = as %class` | Convert a class to an explicitly implemented interface |
 | `%r:any = box %a` | Box `none`, a primitive, or a concrete class |
+| `%r:C = box C(%a)` | Allocate a one-field mutable cell of class `C` containing `%a` |
 | `%r:bool = is %box T` | Test the contained concrete type tag |
 | `%r:T = cast %box T` | Recover a value; traps if its tag differs |
 | `jump block(%a, ...)` | Transfer values to block parameters |
@@ -121,6 +122,6 @@ Negative lengths, oversized allocations, invalid handles, and out-of-range
 indexes trap. These operations are compiler-lowering primitives; source Doof
 code reaches them through generated wrapper classes.
 
-Interfaces and `any` cannot be boxed directly; box the concrete class value. A failed `cast` traps. Other invalid runtime operations, such as division by zero, follow Wasm trap behavior. The compiler rejects malformed types, calls, interface implementations, and control-flow edges before emission.
+For `box C(%a)`, `C` must be a declared class with exactly one mutable field whose type matches `%a`; this form allocates the cell and initializes that field. In the `any` form, interfaces and `any` cannot be boxed directly; box the concrete class value. A failed `cast` traps. Other invalid runtime operations, such as division by zero, follow Wasm trap behavior. The compiler rejects malformed types, calls, interface implementations, and control-flow edges before emission.
 
 Strings, first-class arrays, closures, weak references, inheritance, generics, and source-level sum types are outside this language. Array-data operations are internal lowering instructions; source Doof can access arrays only through compiler-generated wrappers. A source compiler can represent a union as `any`, box each member, and use `is` and `cast` to inspect it.

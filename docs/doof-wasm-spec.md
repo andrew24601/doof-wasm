@@ -44,8 +44,9 @@ the full Doof compiler.
   type captures, `none`, and wildcard arms; and `while` loops.
 - Function values lower to generated `__closure_<result>_<arg>...` interfaces
   and one class per lambda. Lambdas can capture immutable locals by copying
-  them into immutable fields; calls dispatch through the generated `invoke`
-  method. Capturing mutable `let` locals is not supported yet.
+  them into immutable fields. Mutable `let` captures share a generated cell
+  with the outer binding, so updates are visible both inside and outside the
+  closure. Calls dispatch through the generated `invoke` method.
 - Arithmetic `+`, `-`, `*`, `/`; comparisons `==`, `!=`, `<`, `>`; unary `-`
   and `!`; direct, instance, named, and closure calls; field reads and writes;
   positional and named class construction; class-to-interface assignment;
@@ -62,7 +63,7 @@ or loop edges are passed as block arguments.
 
 Imports and multiple source files, generics, string-backed enums, arrays whose
 element type is unsupported by doof--, labeled loops, `break`, `continue`, while-else
-clauses, static members, weak references, mutable closure captures, case expressions,
+clauses, static members, weak references, case expressions,
 value/range patterns, and multiple patterns per case arm,
 async code, compound assignments, nested lexical blocks, and other source expressions. The doof-- backend
 already supports more control flow and runtime operations; the source lowering

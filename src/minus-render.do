@@ -43,6 +43,7 @@ function renderInstruction(instruction: MinusInstruction): string {
   if op == "set" { return "set " + args[0] + "." + args[1] + " = " + args[2] }
   if op == "call" { return prefix + "call " + args[0] + "(" + joined(args, 1) + ")" }
   if op == "call-method" { return prefix + "call " + args[0] + "." + args[1] + "(" + joined(args, 2) + ")" }
+  if op == "box" && args.length == 2 { return prefix + "box " + args[0] + "(" + args[1] + ")" }
   if ["as", "box", "copy", "convert"].contains(op) { return prefix + op + " " + joined(args) }
   if op == "is" || op == "cast" { return prefix + op + " " + args[0] + " " + args[1] }
   if op == "jump" { return "jump " + target(args[0], args, 1, args.length) }

@@ -139,14 +139,33 @@ export function testLowersTwoArgumentStringClosureSignature(): none {
   runWasm(bytes, "closure-signature", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.main()!==5)throw new Error("Two argument string closure returned the wrong value")`)
 }
 
-export function testRejectsMutableClosureCapture(): none {
+export function testLowersMutableClosureCapture(): none {
+  source := "export function main(): int { let value = 40\nstep := (): int => { value = value + 1\nreturn value }\nvalue = 50\ninside := step()\nreturn value + inside }"
   result := lowerDoofWasmSources([
-    SourceFile { path: "/main.do", source: "function make(): (): int { let value = 1\nreturn (): int => value }" },
+    SourceFile { path: "/main.do", source },
   ], "/main.do")
   case result {
-    failure: Failure<string> -> { Assert.stringContains(failure.error, "capturing mutable local value") }
-    _ -> { Assert.fail("Expected mutable closure capture to be rejected") }
+    success: Success<MinusModule> -> {
+      let foundCell = false
+      let foundCellRead = false
+      let foundCellWrite = false
+      for function_ of success.value.functions {
+        for block of function_.blocks {
+          for instruction of block.instructions {
+            if instruction.op == "box" && instruction.args.length == 2 { foundCell = true }
+            if instruction.op == "get" && instruction.args.length == 2 && instruction.args[1] == "value" { foundCellRead = true }
+            if instruction.op == "set" && instruction.args.length == 3 && instruction.args[1] == "value" { foundCellWrite = true }
+          }
+        }
+      }
+      Assert.isTrue(foundCell)
+      Assert.isTrue(foundCellRead)
+      Assert.isTrue(foundCellWrite)
+    }
+    failure: Failure<string> -> { panic(failure.error) }
   }
+  bytes := try! compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  runWasm(bytes, "mutable-closure-capture", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.main()!==102)throw new Error("Mutable closure capture did not share its boxed value")`)
 }
 
 export function testLowersImportedIntegerEnums(): none {

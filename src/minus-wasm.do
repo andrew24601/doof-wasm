@@ -765,6 +765,10 @@ function emitNew(bytes: int[], module_: MinusModule, values: MinusValue[], instr
 }
 
 function emitBox(bytes: int[], module_: MinusModule, values: MinusValue[], instruction: MinusInstruction): none {
+    if instruction.args.length == 2 {
+        emitNew(bytes, module_, values, instruction)
+        return
+    }
     sourceType := valueType(values, instruction.args[0])
     i32(bytes, 24); i32(bytes, ANY_TAG); call(bytes, runtimeFunctionIndex(module_, 0))
     setResult(bytes, module_, values, instruction)

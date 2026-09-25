@@ -57,7 +57,8 @@ function lowerIf(context: FunctionLowering, statement: IfStatement): none {
     let joinParams: MinusValue[] = []
     for index of 0..<locals.length {
       name := "%b" + string(id) + "j" + string(index)
-      joinParams.push(MinusValue { name, typeName: locals[index].typeName })
+      storageType := if locals[index].boxedTypeName == "" then locals[index].typeName else locals[index].boxedTypeName
+      joinParams.push(MinusValue { name, typeName: storageType })
     }
     if yesFlows { effect(yesContext, "jump", concatValues([joinName], bindingValues(yesContext, locals))) }
     if noFlows { effect(noContext, "jump", concatValues([joinName], bindingValues(noContext, locals))) }
@@ -66,7 +67,7 @@ function lowerIf(context: FunctionLowering, statement: IfStatement): none {
     context.currentBlock = MinusBlock { name: joinName, params: joinParams, sourcePath: context.sourcePath }
     context.blocks.push(context.currentBlock)
     for index of 0..<locals.length {
-      context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable })
+      context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
     }
     context.terminated = false
   } else {
@@ -237,7 +238,8 @@ function lowerCaseStatement(context: FunctionLowering, statement: CaseStatement)
   let joinParams: MinusValue[] = []
   if statement.resolvedCompletes! {
     for index of 0..<locals.length {
-      joinParams.push(MinusValue { name: "%b" + string(id) + "j" + string(index), typeName: locals[index].typeName })
+      storageType := if locals[index].boxedTypeName == "" then locals[index].typeName else locals[index].boxedTypeName
+      joinParams.push(MinusValue { name: "%b" + string(id) + "j" + string(index), typeName: storageType })
     }
     for armContext of armContexts {
       if !armContext.terminated {
@@ -254,7 +256,7 @@ function lowerCaseStatement(context: FunctionLowering, statement: CaseStatement)
     context.currentBlock = MinusBlock { name: "case_join" + string(id), params: joinParams, sourcePath: context.sourcePath }
     context.blocks.push(context.currentBlock)
     for index of 0..<locals.length {
-      context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable })
+      context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
     }
     context.terminated = false
   } else {
@@ -335,10 +337,6 @@ function closureCaptures(context: FunctionLowering, expression: LambdaExpression
     if localNames.contains(name) { continue }
     binding := findBinding(context, name)
     if binding == none { continue }
-    if binding!.mutable {
-      context.failed = "capturing mutable local " + name + " is not supported by doof-wasm"
-      return captures
-    }
     captures.push(binding!)
   }
   return captures
@@ -373,9 +371,23 @@ function lowerLambda(context: FunctionLowering, expression: LambdaExpression): s
   let closureClass = MinusClass { name: className, interfaces: [signature], line: context.currentLine, sourcePath: context.sourcePath }
   let args: string[] = [className]
   for index of 0..<captures.length {
-    capture := captures[index]
+    let capture = captures[index]
+    if capture.mutable && capture.boxedTypeName == "" {
+      boxClassName := context.closurePrefix + "_box_" + string(context.closureIndex) + "_" + string(index)
+      context.closureIndex = context.closureIndex + 1
+      boxClass := MinusClass { name: boxClassName, line: context.currentLine, sourcePath: context.sourcePath }
+      boxClass.fields.push(MinusField { name: "value", typeName: capture.typeName, mutable: true, line: context.currentLine, sourcePath: context.sourcePath })
+      context.module_!.classes.push(boxClass)
+      current := findBinding(context, capture.name)
+      if current == none { context.failed = "missing captured binding " + capture.name; return "" }
+      boxed := result(context, "box", [boxClassName, current!.valueName], boxClassName)
+      context.bindings.push(SourceBinding { name: capture.name, typeName: capture.typeName, valueName: boxed, mutable: true, boxedTypeName: boxClassName })
+      capture = findBinding(context, capture.name)!
+      captures[index] = capture
+    }
     fieldName := "_capture_" + string(index)
-    closureClass.fields.push(MinusField { name: fieldName, typeName: capture.typeName, line: context.currentLine, sourcePath: context.sourcePath })
+    captureStorageType := if capture.boxedTypeName == "" then capture.typeName else capture.boxedTypeName
+    closureClass.fields.push(MinusField { name: fieldName, typeName: captureStorageType, line: context.currentLine, sourcePath: context.sourcePath })
     current := findBinding(context, capture.name)
     args.push(if current == none then capture.valueName else current!.valueName)
   }
@@ -396,8 +408,9 @@ function lowerLambda(context: FunctionLowering, expression: LambdaExpression): s
   let params: MinusValue[] = [MinusValue { name: "%self", typeName: className }]
   for index of 0..<captures.length {
     capture := captures[index]
-    captured := result(invoke, "get", ["%self", "_capture_" + string(index)], capture.typeName)
-    invoke.bindings.push(SourceBinding { name: capture.name, typeName: capture.typeName, valueName: captured })
+    captureStorageType := if capture.boxedTypeName == "" then capture.typeName else capture.boxedTypeName
+    captured := result(invoke, "get", ["%self", "_capture_" + string(index)], captureStorageType)
+    invoke.bindings.push(SourceBinding { name: capture.name, typeName: capture.typeName, valueName: captured, mutable: capture.mutable, boxedTypeName: capture.boxedTypeName })
   }
   for index of 0..<expression.params.length {
     parameter := expression.params[index]
@@ -447,6 +460,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
     value: Identifier -> {
       binding := findBinding(context, value.name)
       if binding == none { context.failed = "unsupported global value " + value.name; return "" }
+      if binding!.boxedTypeName != "" { return result(context, "get", [binding!.valueName, "value"], binding!.typeName) }
       return binding!.valueName
     }
     _: ThisExpression -> {
@@ -536,6 +550,10 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
             context.failed = "assignment target must be a mutable local"; return ""
           }
           assigned := lowerExpected(context, value.value, binding!.typeName)
+          if binding!.boxedTypeName != "" {
+            effect(context, "set", [binding!.valueName, "value", assigned])
+            return assigned
+          }
           context.bindings.push(SourceBinding { name: target.name, typeName: binding!.typeName, valueName: assigned, mutable: binding!.mutable })
           return assigned
         }

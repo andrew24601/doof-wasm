@@ -8,8 +8,8 @@ function, class, and interface subset to one doof-- module before using the same
 Wasm backend. Declarations receive module-qualified names when flattened, and
 source paths remain attached to lowered declarations and instructions for
 diagnostics. Lambda values lower to generated interfaces and classes; immutable
-local captures are copied into the generated class, while mutable captures are
-not supported yet. The CLI resolves imports relative to their importing file. It currently
+local captures are copied into the generated class, while mutable captures use
+a shared mutable cell so writes from either side remain visible. The CLI resolves imports relative to their importing file. It currently
   supports local bindings, returns, `if`/`else` branches,
   `while` loops, arithmetic and comparisons, calls, fields, class construction,
   interface conversion, integer-backed enums (including distinct enum tags in

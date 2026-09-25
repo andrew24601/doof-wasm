@@ -234,6 +234,17 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         return Success(target!.result)
     }
     if op == "as" || op == "box" || op == "copy" || op == "convert" {
+        if op == "box" && args.length == 2 {
+            class_ := classByName(module_, args[0])
+            if class_ == none || class_!.fields.length != 1 || !class_!.fields[0].mutable {
+                return Failure(problem(line, "box cell needs a class with one mutable field"))
+            }
+            try source := valueType(values, args[1], line)
+            if source != class_!.fields[0].typeName || resultType != class_!.name {
+                return Failure(problem(line, "box cell value and result need the cell field type and class"))
+            }
+            return Success(resultType)
+        }
         if args.length != 1 { return Failure(problem(line, op + " needs one value")) }
         try source := valueType(values, args[0], line)
         if op == "copy" { return Success(source) }
