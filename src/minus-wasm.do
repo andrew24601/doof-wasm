@@ -9,7 +9,11 @@ import { validateDoofMinus } from "./minus-validate"
 // Function indices 0-2 are the allocator, retain, and release helpers.
 // Runtime tag zero is reserved for free blocks. Array data is uniquely owned
 // by its array and must be managed by array intrinsics, not retain/release.
-readonly ARRAY_DATA_TAG = 30
+readonly ARRAY_DATA_TAG = 30 // Legacy single-block arrays and strings.
+readonly ARRAY_DESCRIPTOR_TAG = 29
+readonly ARRAY_NODE_TAG = 28
+readonly ARRAY_CHUNK_TAG = 27
+readonly ARRAY_CHUNK_BYTES = 1024
 readonly ANY_TAG = 31
 readonly MIN_BLOCK_SIZE = 24
 readonly MAX_BLOCK_SIZE = 1032
@@ -54,7 +58,7 @@ function reference(module_: MinusModule, typeName: string): bool {
 }
 
 function tag(module_: MinusModule, typeName: string): int {
-    let names: string[] = ["none", "bool", "char", "byte", "short", "int", "long", "float", "double"]
+    let names: string[] = ["none", "bool", "char", "byte", "int", "long", "float", "double"]
     for index of 0..<names.length { if names[index] == typeName { return index } }
     for index of 0..<module_.classes.length { if module_.classes[index].name == typeName { return 32 + index } }
     // Enums keep nominal any-tags while using scalar i32 storage. Their tag
@@ -123,9 +127,8 @@ function load(bytes: int[], typeName: string, offset: int): none {
     if typeName == "float" { code = 42 }
     if typeName == "double" { code = 43 }
     if typeName == "bool" || typeName == "byte" || typeName == "char" { code = 45 }
-    if typeName == "short" { code = 46 }
     op(bytes, code)
-    unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "bool" || typeName == "byte" || typeName == "char" then 0 else 2)
+    unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "bool" || typeName == "byte" || typeName == "char" then 0 else 2)
     unsigned(bytes, offset)
 }
 function store(bytes: int[], typeName: string, offset: int): none {
@@ -134,9 +137,8 @@ function store(bytes: int[], typeName: string, offset: int): none {
     if typeName == "float" { code = 56 }
     if typeName == "double" { code = 57 }
     if typeName == "bool" || typeName == "byte" || typeName == "char" { code = 58 }
-    if typeName == "short" { code = 59 }
     op(bytes, code)
-    unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "bool" || typeName == "byte" || typeName == "char" then 0 else 2)
+    unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "bool" || typeName == "byte" || typeName == "char" then 0 else 2)
     unsigned(bytes, offset)
 }
 function load32(bytes: int[], offset: int): none { load(bytes, "int", offset) }
@@ -289,14 +291,12 @@ function emitRelease(module_: MinusModule): int[] {
 
 function arrayWidth(typeName: string): int {
     if typeName == "bool" || typeName == "byte" || typeName == "char" { return 1 }
-    if typeName == "short" { return 2 }
     if typeName == "long" || typeName == "double" { return 8 }
     return 4
 }
 
 function arrayLoadCode(typeName: string): int {
     if typeName == "bool" || typeName == "byte" || typeName == "char" { return 45 }
-    if typeName == "short" { return 46 }
     if typeName == "long" { return 41 }
     if typeName == "float" { return 42 }
     if typeName == "double" { return 43 }
@@ -305,53 +305,254 @@ function arrayLoadCode(typeName: string): int {
 
 function arrayStoreCode(typeName: string): int {
     if typeName == "bool" || typeName == "byte" || typeName == "char" { return 58 }
-    if typeName == "short" { return 59 }
     if typeName == "long" { return 55 }
     if typeName == "float" { return 56 }
     if typeName == "double" { return 57 }
     return 54
 }
 
-function arrayAddress(bytes: int[], values: MinusValue[], handle: string, index: string, typeName: string): none {
-    getValue(bytes, values, handle)
-    i32(bytes, 8); op(bytes, 106)
-    getValue(bytes, values, index)
+function arrayHandle(bytes: int[], values: MinusValue[], handle: string, handleLocal: int): none {
+    if handleLocal >= 0 { localGet(bytes, handleLocal) } else { getValue(bytes, values, handle) }
+}
+
+function arrayAddress(bytes: int[], module_: MinusModule, values: MinusValue[], handle: string, index: string, typeName: string, scratch: int, indexLocal: int = -1, handleLocal: int = -1): none {
     width := arrayWidth(typeName)
-    if width == 2 { i32(bytes, 1); op(bytes, 116) }
+    let indexIsLocal = indexLocal >= 0
+    // Small arrays and strings retain the original contiguous representation.
+    arrayHandle(bytes, values, handle, handleLocal); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DATA_TAG); op(bytes, 70); op(bytes, 4); op(bytes, 127) // if (result i32)
+    arrayHandle(bytes, values, handle, handleLocal); i32(bytes, 8); op(bytes, 106)
+    if indexIsLocal { localGet(bytes, indexLocal) } else { getValue(bytes, values, index) }
     if width == 4 { i32(bytes, 2); op(bytes, 116) }
     if width == 8 { i32(bytes, 3); op(bytes, 116) }
     op(bytes, 106)
+    op(bytes, 5)
+    // Large arrays use a 3-level, 256-way radix directory. Three levels cover
+    // every chunk addressable by a signed 32-bit array length. The directory
+    // depth stays fixed, so random access remains O(1) as arrays grow.
+    arrayHandle(bytes, values, handle, handleLocal); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DESCRIPTOR_TAG); op(bytes, 71); if_(bytes); op(bytes, 0); end(bytes)
+    if indexIsLocal { localGet(bytes, indexLocal) } else { getValue(bytes, values, index) }
+    i32(bytes, ARRAY_CHUNK_BYTES \ width); op(bytes, 109); localSet(bytes, scratch)
+    arrayHandle(bytes, values, handle, handleLocal); load32(bytes, 12); localSet(bytes, scratch + 1)
+    localGet(bytes, scratch + 1); i32(bytes, 8); op(bytes, 106)
+    localGet(bytes, scratch); i32(bytes, 16); op(bytes, 117); i32(bytes, 2); op(bytes, 116); op(bytes, 106); load32(bytes, 0); localSet(bytes, scratch + 1)
+    localGet(bytes, scratch + 1); i32(bytes, 8); op(bytes, 106)
+    localGet(bytes, scratch); i32(bytes, 8); op(bytes, 117); i32(bytes, 255); op(bytes, 113); i32(bytes, 2); op(bytes, 116); op(bytes, 106); load32(bytes, 0); localSet(bytes, scratch + 1)
+    localGet(bytes, scratch + 1); i32(bytes, 8); op(bytes, 106)
+    localGet(bytes, scratch); i32(bytes, 255); op(bytes, 113); i32(bytes, 2); op(bytes, 116); op(bytes, 106); load32(bytes, 0)
+    i32(bytes, 8); op(bytes, 106)
+    if indexIsLocal { localGet(bytes, indexLocal) } else { getValue(bytes, values, index) }
+    i32(bytes, ARRAY_CHUNK_BYTES \ width); op(bytes, 111)
+    if width == 4 { i32(bytes, 2); op(bytes, 116) }
+    if width == 8 { i32(bytes, 3); op(bytes, 116) }
+    op(bytes, 106)
+    end(bytes)
 }
 
 function checkArrayBounds(bytes: int[], values: MinusValue[], handle: string, index: string): none {
-    getValue(bytes, values, handle); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DATA_TAG); op(bytes, 71); if_(bytes); op(bytes, 0); end(bytes)
+    getValue(bytes, values, handle); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DATA_TAG); op(bytes, 71)
+    getValue(bytes, values, handle); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DESCRIPTOR_TAG); op(bytes, 71); op(bytes, 113); if_(bytes); op(bytes, 0); end(bytes)
     getValue(bytes, values, index); i32(bytes, 0); op(bytes, 72); if_(bytes); op(bytes, 0); end(bytes)
     getValue(bytes, values, index); getValue(bytes, values, handle); load32(bytes, 4); op(bytes, 78); if_(bytes); op(bytes, 0); end(bytes)
+}
+
+function emitOwnedArrayBlock(bytes: int[], module_: MinusModule, descriptorLocal: int, resultLocal: int, zeroIndexLocal: int, blockTag: int): none {
+    i32(bytes, 1032); i32(bytes, blockTag); call(bytes, runtimeFunctionIndex(module_, 0)); localSet(bytes, resultLocal)
+    // Every directory slot and every reference-array slot starts empty. This
+    // also makes blocks safe when they are reused from the allocator's free list.
+    i32(bytes, 0); localSet(bytes, zeroIndexLocal)
+    block(bytes); loop(bytes)
+    localGet(bytes, zeroIndexLocal); i32(bytes, 256); op(bytes, 78); op(bytes, 13); unsigned(bytes, 1)
+    localGet(bytes, resultLocal); i32(bytes, 8); op(bytes, 106)
+    localGet(bytes, zeroIndexLocal); i32(bytes, 2); op(bytes, 116); op(bytes, 106)
+    i32(bytes, 0); store32(bytes, 0)
+    localGet(bytes, zeroIndexLocal); i32(bytes, 1); op(bytes, 106); localSet(bytes, zeroIndexLocal)
+    op(bytes, 12); unsigned(bytes, 0)
+    end(bytes); end(bytes)
+    localGet(bytes, resultLocal)
+    localGet(bytes, descriptorLocal); load32(bytes, 16); store32(bytes, 4)
+    localGet(bytes, descriptorLocal); localGet(bytes, resultLocal); store32(bytes, 16)
+}
+
+function emitFreeArrayBlock(bytes: int[], pointerLocal: int, nextLocal: int, binAddressLocal: int, binOffset: int): none {
+    localGet(bytes, pointerLocal); i32(bytes, 4); op(bytes, 106); load32(bytes, 0); localSet(bytes, nextLocal)
+    localGet(bytes, pointerLocal); i32(bytes, 0); store16(bytes, 0)
+    i32(bytes, binOffset); localSet(bytes, binAddressLocal)
+    localGet(bytes, pointerLocal); localGet(bytes, binAddressLocal); load32(bytes, 0); store32(bytes, 4)
+    localGet(bytes, binAddressLocal); localGet(bytes, pointerLocal); store32(bytes, 0)
+}
+
+function emitArrayChunk(bytes: int[], module_: MinusModule, scratchIndex: int): none {
+    // Root slot: the high eight bits of the 24-bit chunk ordinal.
+    localGet(bytes, scratchIndex); load32(bytes, 12); localSet(bytes, scratchIndex + 4)
+    localGet(bytes, scratchIndex + 4); i32(bytes, 8); op(bytes, 106)
+    localGet(bytes, scratchIndex + 3); i32(bytes, 16); op(bytes, 117); i32(bytes, 2); op(bytes, 116); op(bytes, 106); localSet(bytes, scratchIndex + 4)
+    localGet(bytes, scratchIndex + 4); load32(bytes, 0); localSet(bytes, scratchIndex + 4)
+    localGet(bytes, scratchIndex + 4); op(bytes, 69); if_(bytes)
+    emitOwnedArrayBlock(bytes, module_, scratchIndex, scratchIndex + 5, scratchIndex + 7, ARRAY_NODE_TAG)
+    localGet(bytes, scratchIndex + 5); localSet(bytes, scratchIndex + 4)
+    localGet(bytes, scratchIndex); load32(bytes, 12); i32(bytes, 8); op(bytes, 106)
+    localGet(bytes, scratchIndex + 3); i32(bytes, 16); op(bytes, 117); i32(bytes, 2); op(bytes, 116); op(bytes, 106)
+    localGet(bytes, scratchIndex + 4); store32(bytes, 0)
+    end(bytes)
+    // Middle slot: the next eight bits.
+    localGet(bytes, scratchIndex + 4); i32(bytes, 8); op(bytes, 106)
+    localGet(bytes, scratchIndex + 3); i32(bytes, 8); op(bytes, 117); i32(bytes, 255); op(bytes, 113); i32(bytes, 2); op(bytes, 116); op(bytes, 106); localSet(bytes, scratchIndex + 5)
+    localGet(bytes, scratchIndex + 5); load32(bytes, 0); localSet(bytes, scratchIndex + 5)
+    localGet(bytes, scratchIndex + 5); op(bytes, 69); if_(bytes)
+    emitOwnedArrayBlock(bytes, module_, scratchIndex, scratchIndex + 6, scratchIndex + 7, ARRAY_NODE_TAG)
+    localGet(bytes, scratchIndex + 6); localSet(bytes, scratchIndex + 5)
+    localGet(bytes, scratchIndex + 4); i32(bytes, 8); op(bytes, 106)
+    localGet(bytes, scratchIndex + 3); i32(bytes, 8); op(bytes, 117); i32(bytes, 255); op(bytes, 113); i32(bytes, 2); op(bytes, 116); op(bytes, 106)
+    localGet(bytes, scratchIndex + 5); store32(bytes, 0)
+    end(bytes)
+    // Leaf slot: low eight bits point to the actual element chunk.
+    localGet(bytes, scratchIndex + 5); i32(bytes, 8); op(bytes, 106)
+    localGet(bytes, scratchIndex + 3); i32(bytes, 255); op(bytes, 113); i32(bytes, 2); op(bytes, 116); op(bytes, 106); localSet(bytes, scratchIndex + 4)
+    emitOwnedArrayBlock(bytes, module_, scratchIndex, scratchIndex + 6, scratchIndex + 7, ARRAY_CHUNK_TAG)
+    localGet(bytes, scratchIndex + 4); localGet(bytes, scratchIndex + 6); store32(bytes, 0)
+}
+
+function emitArrayAllocation(bytes: int[], module_: MinusModule, scratchIndex: int, lengthLocal: int, typeName: string): none {
+    width := arrayWidth(typeName)
+    localGet(bytes, lengthLocal); i32(bytes, 0); op(bytes, 72); if_(bytes); op(bytes, 0); end(bytes)
+    localGet(bytes, lengthLocal); i32(bytes, 1024 \ width); op(bytes, 76); if_(bytes)
+    // The common small-array representation remains compact and also
+    // covers the host string ABI. Larger arrays use owned radix chunks.
+    localGet(bytes, lengthLocal); i32(bytes, width); op(bytes, 108); localSet(bytes, scratchIndex + 1)
+    localGet(bytes, scratchIndex + 1); i32(bytes, 16); op(bytes, 75); if_(bytes)
+    localGet(bytes, scratchIndex + 1); i32(bytes, 16); op(bytes, 107); i32(bytes, 15); op(bytes, 106); i32(bytes, 16); op(bytes, 110); i32(bytes, 16); op(bytes, 108); i32(bytes, 24); op(bytes, 106); localSet(bytes, scratchIndex + 1)
+    op(bytes, 5); i32(bytes, 24); localSet(bytes, scratchIndex + 1)
+    end(bytes)
+    localGet(bytes, scratchIndex + 1); i32(bytes, ARRAY_DATA_TAG); call(bytes, runtimeFunctionIndex(module_, 0)); localSet(bytes, scratchIndex)
+    localGet(bytes, scratchIndex); localGet(bytes, lengthLocal); store32(bytes, 4)
+    if reference(module_, typeName) {
+        // Reused small blocks may still contain pointers from old owners.
+        i32(bytes, 0); localSet(bytes, scratchIndex + 2)
+        block(bytes); loop(bytes)
+        localGet(bytes, scratchIndex + 2); localGet(bytes, lengthLocal); op(bytes, 78); branchIf(bytes, 1)
+        localGet(bytes, scratchIndex); i32(bytes, 8); op(bytes, 106)
+        localGet(bytes, scratchIndex + 2); i32(bytes, 2); op(bytes, 116); op(bytes, 106)
+        i32(bytes, 0); store32(bytes, 0)
+        localGet(bytes, scratchIndex + 2); i32(bytes, 1); op(bytes, 106); localSet(bytes, scratchIndex + 2)
+        branch(bytes, 0)
+        end(bytes); end(bytes)
+    }
+    op(bytes, 5)
+    // descriptor: length@4, allocated chunk count@8, radix root@12,
+    // ownership-chain head@16. Chunk capacity is element-width dependent.
+    i32(bytes, 24); i32(bytes, ARRAY_DESCRIPTOR_TAG); call(bytes, runtimeFunctionIndex(module_, 0)); localSet(bytes, scratchIndex)
+    localGet(bytes, scratchIndex); i32(bytes, 0); store32(bytes, 16)
+    localGet(bytes, lengthLocal); localSet(bytes, scratchIndex + 1)
+    localGet(bytes, scratchIndex); localGet(bytes, scratchIndex + 1); store32(bytes, 4)
+    localGet(bytes, scratchIndex + 1); i32(bytes, ARRAY_CHUNK_BYTES \ width); op(bytes, 109); localSet(bytes, scratchIndex + 2)
+    localGet(bytes, scratchIndex + 1); i32(bytes, ARRAY_CHUNK_BYTES \ width); op(bytes, 111); if_(bytes)
+    localGet(bytes, scratchIndex + 2); i32(bytes, 1); op(bytes, 106); localSet(bytes, scratchIndex + 2)
+    end(bytes)
+    localGet(bytes, scratchIndex); localGet(bytes, scratchIndex + 2); store32(bytes, 8)
+    emitOwnedArrayBlock(bytes, module_, scratchIndex, scratchIndex + 5, scratchIndex + 7, ARRAY_NODE_TAG)
+    localGet(bytes, scratchIndex); localGet(bytes, scratchIndex + 5); store32(bytes, 12)
+    i32(bytes, 0); localSet(bytes, scratchIndex + 3)
+    block(bytes); loop(bytes)
+    localGet(bytes, scratchIndex + 3); localGet(bytes, scratchIndex + 2); op(bytes, 78); op(bytes, 13); unsigned(bytes, 1)
+    emitArrayChunk(bytes, module_, scratchIndex)
+    localGet(bytes, scratchIndex + 3); i32(bytes, 1); op(bytes, 106); localSet(bytes, scratchIndex + 3)
+    op(bytes, 12); unsigned(bytes, 0)
+    end(bytes); end(bytes)
+    end(bytes)
 }
 
 function emitArrayInstruction(bytes: int[], module_: MinusModule, values: MinusValue[], scratchIndex: int, instruction: MinusInstruction): none {
     args := instruction.args
     if instruction.op == "array-alloc" {
-        typeName := args[1]
-        width := arrayWidth(typeName)
-        getValue(bytes, values, args[0]); i32(bytes, 0); op(bytes, 72); if_(bytes); op(bytes, 0); end(bytes)
-        getValue(bytes, values, args[0]); i32(bytes, 1024 \ width); op(bytes, 74); if_(bytes); op(bytes, 0); end(bytes)
-        getValue(bytes, values, args[0]); i32(bytes, width); op(bytes, 108); localSet(bytes, scratchIndex)
-        localGet(bytes, scratchIndex); i32(bytes, 16); op(bytes, 75); if_(bytes)
-        localGet(bytes, scratchIndex); i32(bytes, 16); op(bytes, 107); i32(bytes, 15); op(bytes, 106); i32(bytes, 16); op(bytes, 110); i32(bytes, 16); op(bytes, 108); i32(bytes, 24); op(bytes, 106); localSet(bytes, scratchIndex)
-        op(bytes, 5); i32(bytes, 24); localSet(bytes, scratchIndex)
-        end(bytes)
-        localGet(bytes, scratchIndex); i32(bytes, ARRAY_DATA_TAG); call(bytes, runtimeFunctionIndex(module_, 0)); localSet(bytes, scratchIndex)
-        localGet(bytes, scratchIndex); getValue(bytes, values, args[0]); store32(bytes, 4)
+        emitArrayAllocation(bytes, module_, scratchIndex, valueIndex(values, args[0]), args[1])
         localGet(bytes, scratchIndex); setResult(bytes, module_, values, instruction)
         return
     }
+    if instruction.op == "array-push" {
+        typeName := valueType(values, args[1])
+        width := arrayWidth(typeName)
+        getValue(bytes, values, args[0]); localSet(bytes, scratchIndex + 9)
+        localGet(bytes, scratchIndex + 9); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DATA_TAG); op(bytes, 71)
+        localGet(bytes, scratchIndex + 9); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DESCRIPTOR_TAG); op(bytes, 71); op(bytes, 113); if_(bytes); op(bytes, 0); end(bytes)
+        localGet(bytes, scratchIndex + 9); load32(bytes, 4); localSet(bytes, scratchIndex + 10)
+        localGet(bytes, scratchIndex + 10); i32(bytes, 2147483647); op(bytes, 70); if_(bytes); op(bytes, 0); end(bytes)
+        localGet(bytes, scratchIndex + 10); i32(bytes, 1); op(bytes, 106); localSet(bytes, scratchIndex + 8)
+        localGet(bytes, scratchIndex + 9); localSet(bytes, scratchIndex)
+        localGet(bytes, scratchIndex); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DATA_TAG); op(bytes, 70); if_(bytes)
+        // Small blocks grow geometrically, then migrate once to radix chunks.
+        localGet(bytes, scratchIndex + 8); i32(bytes, width); op(bytes, 108)
+        localGet(bytes, scratchIndex); load16Unsigned(bytes, 2); i32(bytes, 8); op(bytes, 107); op(bytes, 75); if_(bytes)
+        localGet(bytes, scratchIndex + 8); i32(bytes, 1024 \ width); op(bytes, 76); if_(bytes)
+        localGet(bytes, scratchIndex + 9); load16Unsigned(bytes, 2); i32(bytes, 8); op(bytes, 107); i32(bytes, 2); op(bytes, 108); localSet(bytes, scratchIndex + 1)
+        localGet(bytes, scratchIndex + 1); i32(bytes, 1024); op(bytes, 75); if_(bytes); i32(bytes, 1024); localSet(bytes, scratchIndex + 1); end(bytes)
+        localGet(bytes, scratchIndex + 1); i32(bytes, width); op(bytes, 110); localSet(bytes, scratchIndex + 11)
+        emitArrayAllocation(bytes, module_, scratchIndex, scratchIndex + 11, typeName)
+        op(bytes, 5)
+        emitArrayAllocation(bytes, module_, scratchIndex, scratchIndex + 8, typeName)
+        end(bytes)
+        localGet(bytes, scratchIndex); localSet(bytes, scratchIndex + 11)
+        // Transfer existing payload bytes without changing element ownership.
+        i32(bytes, 0); localSet(bytes, scratchIndex + 3)
+        arrayAddress(bytes, module_, values, "", "", typeName, scratchIndex + 4, scratchIndex + 3, scratchIndex + 11); localSet(bytes, scratchIndex + 2)
+        block(bytes); loop(bytes)
+        localGet(bytes, scratchIndex + 3); localGet(bytes, scratchIndex + 10); i32(bytes, width); op(bytes, 108); op(bytes, 78); branchIf(bytes, 1)
+        localGet(bytes, scratchIndex + 2); localGet(bytes, scratchIndex + 3); op(bytes, 106)
+        localGet(bytes, scratchIndex + 9); i32(bytes, 8); op(bytes, 106); localGet(bytes, scratchIndex + 3); op(bytes, 106); load(bytes, "byte", 0); store(bytes, "byte", 0)
+        localGet(bytes, scratchIndex + 3); i32(bytes, 1); op(bytes, 106); localSet(bytes, scratchIndex + 3); branch(bytes, 0)
+        end(bytes); end(bytes)
+        // Only the old raw block is freed: references moved into the new block.
+        localGet(bytes, scratchIndex + 9); load16Unsigned(bytes, 2); i32(bytes, MIN_BLOCK_SIZE); op(bytes, 107); i32(bytes, 4); op(bytes, 118); i32(bytes, 2); op(bytes, 116); localSet(bytes, scratchIndex + 1)
+        localGet(bytes, scratchIndex + 9); i32(bytes, 0); store16(bytes, 0)
+        localGet(bytes, scratchIndex + 9); localGet(bytes, scratchIndex + 1); load32(bytes, 0); store32(bytes, 4)
+        localGet(bytes, scratchIndex + 1); localGet(bytes, scratchIndex + 9); store32(bytes, 0)
+        localGet(bytes, scratchIndex + 11); localSet(bytes, scratchIndex)
+        end(bytes)
+        op(bytes, 5)
+        // Append one chunk when the current descriptor's chunks are full.
+        localGet(bytes, scratchIndex + 10); i32(bytes, ARRAY_CHUNK_BYTES \ width); op(bytes, 111); op(bytes, 69); if_(bytes)
+        localGet(bytes, scratchIndex); load32(bytes, 8); localSet(bytes, scratchIndex + 3)
+        emitArrayChunk(bytes, module_, scratchIndex)
+        localGet(bytes, scratchIndex); localGet(bytes, scratchIndex + 3); i32(bytes, 1); op(bytes, 106); store32(bytes, 8)
+        end(bytes)
+        end(bytes)
+        localGet(bytes, scratchIndex); localGet(bytes, scratchIndex + 8); store32(bytes, 4)
+        localGet(bytes, scratchIndex); localSet(bytes, scratchIndex + 11)
+        if reference(module_, typeName) { getValue(bytes, values, args[1]); call(bytes, runtimeFunctionIndex(module_, 1)); op(bytes, 26) }
+        arrayAddress(bytes, module_, values, "", "", typeName, scratchIndex + 4, scratchIndex + 10, scratchIndex + 11)
+        getValue(bytes, values, args[1]); store(bytes, typeName, 0)
+        localGet(bytes, scratchIndex + 11); setResult(bytes, module_, values, instruction)
+        return
+    }
     if instruction.op == "array-free" {
-        getValue(bytes, values, args[0]); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DATA_TAG); op(bytes, 71); if_(bytes); op(bytes, 0); end(bytes)
+        getValue(bytes, values, args[0]); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DATA_TAG); op(bytes, 71)
+        getValue(bytes, values, args[0]); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DESCRIPTOR_TAG); op(bytes, 71); op(bytes, 113); if_(bytes); op(bytes, 0); end(bytes)
+        getValue(bytes, values, args[0]); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DESCRIPTOR_TAG); op(bytes, 70); if_(bytes)
+        if args.length == 2 && reference(module_, args[1]) {
+            i32(bytes, 0); localSet(bytes, scratchIndex + 3)
+            block(bytes); loop(bytes)
+            localGet(bytes, scratchIndex + 3); getValue(bytes, values, args[0]); load32(bytes, 4); op(bytes, 78); op(bytes, 13); unsigned(bytes, 1)
+            arrayAddress(bytes, module_, values, args[0], "", args[1], scratchIndex + 4, scratchIndex + 3)
+            op(bytes, arrayLoadCode(args[1])); unsigned(bytes, if args[1] == "long" || args[1] == "double" then 3 else if args[1] == "byte" || args[1] == "bool" || args[1] == "char" then 0 else 2); unsigned(bytes, 0); call(bytes, runtimeFunctionIndex(module_, 2))
+            localGet(bytes, scratchIndex + 3); i32(bytes, 1); op(bytes, 106); localSet(bytes, scratchIndex + 3)
+            op(bytes, 12); unsigned(bytes, 0)
+            end(bytes); end(bytes)
+        }
+        getValue(bytes, values, args[0]); load32(bytes, 16); localSet(bytes, scratchIndex + 1)
+        block(bytes); loop(bytes)
+        localGet(bytes, scratchIndex + 1); op(bytes, 69); op(bytes, 13); unsigned(bytes, 1)
+        emitFreeArrayBlock(bytes, scratchIndex + 1, scratchIndex + 2, scratchIndex + 6, 252)
+        localGet(bytes, scratchIndex + 2); localSet(bytes, scratchIndex + 1)
+        op(bytes, 12); unsigned(bytes, 0)
+        end(bytes); end(bytes)
+        // Return the fixed-size descriptor to size class zero.
+        getValue(bytes, values, args[0]); i32(bytes, 0); store16(bytes, 0)
+        getValue(bytes, values, args[0]); i32(bytes, 0); load32(bytes, 0); store32(bytes, 4)
+        i32(bytes, 0); getValue(bytes, values, args[0]); store32(bytes, 0)
+        op(bytes, 5)
         if args.length == 2 && reference(module_, args[1]) {
             i32(bytes, 0); localSet(bytes, scratchIndex)
             block(bytes); loop(bytes)
-            localGet(bytes, scratchIndex); getValue(bytes, values, args[0]); load32(bytes, 4); op(bytes, 78); op(bytes, 69); op(bytes, 13); unsigned(bytes, 1)
+            localGet(bytes, scratchIndex); getValue(bytes, values, args[0]); load32(bytes, 4); op(bytes, 78); op(bytes, 13); unsigned(bytes, 1)
             getValue(bytes, values, args[0]); i32(bytes, 8); op(bytes, 106)
             localGet(bytes, scratchIndex); i32(bytes, 2); op(bytes, 116); op(bytes, 106); load32(bytes, 0); call(bytes, runtimeFunctionIndex(module_, 2))
             localGet(bytes, scratchIndex); i32(bytes, 1); op(bytes, 106); localSet(bytes, scratchIndex)
@@ -362,30 +563,33 @@ function emitArrayInstruction(bytes: int[], module_: MinusModule, values: MinusV
         getValue(bytes, values, args[0]); i32(bytes, 0); store16(bytes, 0)
         getValue(bytes, values, args[0]); localGet(bytes, scratchIndex); load32(bytes, 0); store32(bytes, 4)
         localGet(bytes, scratchIndex); getValue(bytes, values, args[0]); store32(bytes, 0)
+        end(bytes)
         return
     }
     if instruction.op == "array-length" {
-        getValue(bytes, values, args[0]); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DATA_TAG); op(bytes, 71); if_(bytes); op(bytes, 0); end(bytes)
+        getValue(bytes, values, args[0]); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DATA_TAG); op(bytes, 71)
+        getValue(bytes, values, args[0]); load16Unsigned(bytes, 0); i32(bytes, ARRAY_DESCRIPTOR_TAG); op(bytes, 71); op(bytes, 113); if_(bytes); op(bytes, 0); end(bytes)
         getValue(bytes, values, args[0]); load32(bytes, 4); setResult(bytes, module_, values, instruction)
         return
     }
     typeName := if instruction.op == "array-get" then instruction.result!.typeName else valueType(values, args[2])
     checkArrayBounds(bytes, values, args[0], args[1])
     if instruction.op == "array-get" {
-        arrayAddress(bytes, values, args[0], args[1], typeName)
-        op(bytes, arrayLoadCode(typeName)); unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "byte" || typeName == "bool" || typeName == "char" then 0 else 2); unsigned(bytes, 0)
+        arrayAddress(bytes, module_, values, args[0], args[1], typeName, scratchIndex)
+        op(bytes, arrayLoadCode(typeName)); unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "byte" || typeName == "bool" || typeName == "char" then 0 else 2); unsigned(bytes, 0)
         retainTop(bytes, module_, typeName)
         setResult(bytes, module_, values, instruction)
         return
     }
     if reference(module_, typeName) {
-        arrayAddress(bytes, values, args[0], args[1], typeName)
-        op(bytes, arrayLoadCode(typeName)); unsigned(bytes, 2); unsigned(bytes, 8); call(bytes, runtimeFunctionIndex(module_, 2))
-        getValue(bytes, values, args[2]); call(bytes, runtimeFunctionIndex(module_, 1))
+        // Retain first so replacing a slot with the same object is safe.
+        getValue(bytes, values, args[2]); call(bytes, runtimeFunctionIndex(module_, 1)); op(bytes, 26)
+        arrayAddress(bytes, module_, values, args[0], args[1], typeName, scratchIndex)
+        op(bytes, arrayLoadCode(typeName)); unsigned(bytes, 2); unsigned(bytes, 0); call(bytes, runtimeFunctionIndex(module_, 2))
     }
-    arrayAddress(bytes, values, args[0], args[1], typeName)
+    arrayAddress(bytes, module_, values, args[0], args[1], typeName, scratchIndex)
     getValue(bytes, values, args[2])
-    op(bytes, arrayStoreCode(typeName)); unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "short" then 1 else if typeName == "byte" || typeName == "bool" || typeName == "char" then 0 else 2); unsigned(bytes, 0)
+    op(bytes, arrayStoreCode(typeName)); unsigned(bytes, if typeName == "long" || typeName == "double" then 3 else if typeName == "byte" || typeName == "bool" || typeName == "char" then 0 else 2); unsigned(bytes, 0)
 }
 
 function body(bytes: int[], locals: int[], instructions: int[]): none {
@@ -545,7 +749,6 @@ function retainTop(bytes: int[], module_: MinusModule, typeName: string): none {
 
 function normalize(bytes: int[], typeName: string): none {
     if typeName == "byte" { i32(bytes, 255); op(bytes, 113) }
-    if typeName == "short" { i32(bytes, 16); op(bytes, 116); i32(bytes, 16); op(bytes, 117) }
 }
 
 function emitConstant(bytes: int[], instruction: MinusInstruction): none {
@@ -795,6 +998,38 @@ function emitTagOperation(bytes: int[], module_: MinusModule, values: MinusValue
     setResult(bytes, module_, values, instruction)
 }
 
+// Boxed unions compare their nominal tags and then their typed payloads.
+function emitAnyEquality(bytes: int[], module_: MinusModule, values: MinusValue[], left: string, right: string): none {
+    getValue(bytes, values, left); op(bytes, 69)
+    getValue(bytes, values, right); op(bytes, 69); op(bytes, 114)
+    op(bytes, 4); op(bytes, 127)
+    getValue(bytes, values, left); getValue(bytes, values, right); op(bytes, 70)
+    op(bytes, 5)
+    getValue(bytes, values, left); load16Unsigned(bytes, 8)
+    getValue(bytes, values, right); load16Unsigned(bytes, 8); op(bytes, 70)
+    op(bytes, 4); op(bytes, 127)
+    let types: string[] = ["none", "bool", "char", "byte", "int", "long", "float", "double"]
+    for class_ of module_.classes { types.push(class_.name) }
+    for enum_ of module_.enums { types.push(enum_.name) }
+    for typeName of types {
+        getValue(bytes, values, left); load16Unsigned(bytes, 8); i32(bytes, tag(module_, typeName)); op(bytes, 70)
+        op(bytes, 4); op(bytes, 127)
+        if typeName == "none" { i32(bytes, 1) }
+        else {
+            getValue(bytes, values, left); load(bytes, typeName, 16)
+            getValue(bytes, values, right); load(bytes, typeName, 16)
+            if typeName == "__doof_string" {
+                call(bytes, functionIndex(module_, "__doof_string.compare")); i32(bytes, 0); op(bytes, 70)
+            } else { op(bytes, arithmeticCode(typeName, "eq")) }
+        }
+        op(bytes, 5)
+    }
+    i32(bytes, 0)
+    for _ of types { end(bytes) }
+    op(bytes, 5); i32(bytes, 0); end(bytes)
+    end(bytes)
+}
+
 function emitInstruction(bytes: int[], module_: MinusModule, function_: MinusFunction, values: MinusValue[], pcIndex: int, scratchIndex: int, instruction: MinusInstruction): none {
     operation := instruction.op
     args := instruction.args
@@ -807,6 +1042,11 @@ function emitInstruction(bytes: int[], module_: MinusModule, function_: MinusFun
         return
     }
     if operation == "const" { emitConstant(bytes, instruction); setResult(bytes, module_, values, instruction); return }
+    if operation == "eq" && valueType(values, args[0]) == "any" {
+        emitAnyEquality(bytes, module_, values, args[0], args[1])
+        setResult(bytes, module_, values, instruction)
+        return
+    }
     if ["add", "sub", "mul", "div", "eq", "lt"].contains(operation) {
         getValue(bytes, values, args[0]); getValue(bytes, values, args[1])
         typeName := valueType(values, args[0])
@@ -828,7 +1068,7 @@ function emitInstruction(bytes: int[], module_: MinusModule, function_: MinusFun
         return
     }
     if operation == "new" { emitNew(bytes, module_, values, instruction); return }
-    if ["array-alloc", "array-free", "array-length", "array-get", "array-set"].contains(operation) { emitArrayInstruction(bytes, module_, values, scratchIndex, instruction); return }
+    if ["array-alloc", "array-free", "array-length", "array-get", "array-set", "array-push"].contains(operation) { emitArrayInstruction(bytes, module_, values, scratchIndex, instruction); return }
     if operation == "get" || operation == "set" { emitField(bytes, module_, values, instruction); return }
     if operation == "call" || operation == "call-method" { emitCall(bytes, module_, values, scratchIndex, instruction); return }
     if operation == "box" { emitBox(bytes, module_, values, instruction); return }
@@ -859,7 +1099,7 @@ function emitUserFunction(module_: MinusModule, function_: MinusFunction): int[]
     for index of 0..<function_.params.length {
         typeName := function_.params[index].typeName
         if reference(module_, typeName) { localGet(bytes, index); call(bytes, runtimeFunctionIndex(module_, 1)); localSet(bytes, index) }
-        if typeName == "byte" || typeName == "short" {
+        if typeName == "byte" {
             localGet(bytes, index); normalize(bytes, typeName); localSet(bytes, index)
         }
         if typeName == "bool" {
@@ -897,6 +1137,7 @@ export function encodeDoofMinus(module_: MinusModule, debugHeap: bool = false): 
         for index of function_.params.length..<values.length { locals.push(wasmType(values[index].typeName)) }
         locals.push(127) // program counter
         locals.push(127) // indirect-call table index
+        for _ of 0..<11 { locals.push(127) } // radix array scratch locals
         body(code, locals, emitUserFunction(module_, function_))
     }
     if constants.length > 0 { body(code, [127, 127, 127], emitStringPoolInitializer(module_, constants)) }

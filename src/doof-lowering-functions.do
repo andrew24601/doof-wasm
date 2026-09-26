@@ -421,11 +421,6 @@ function lowerArrayLiteral(context: FunctionLowering, literal: ArrayLiteral, exp
     context.failed = "only byte[] and char[] literals or class-instance arrays are supported by doof-wasm"
     return ""
   }
-  width := if ["bool", "byte", "char"].contains(elementType) then 1 else if elementType == "short" then 2 else if elementType == "long" || elementType == "double" then 8 else 4
-  if literal.elements.length > 1024 \ width {
-    context.failed = "array literals are limited to 1024 payload bytes"
-    return ""
-  }
   length := result(context, "const", [string(literal.elements.length)], "int")
   data := result(context, "array-alloc", [length, elementType], "int")
   for index of 0..<literal.elements.length {
@@ -724,8 +719,12 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
           if target.optional { context.failed = "optional array indexing is not supported by doof-wasm"; return "" }
           array := lowerExpression(context, target.object)
           index := lowerExpression(context, target.index)
-          assigned := lowerExpected(context, value.value, typeFromValue(expression))
-          return result(context, "call-method", [array, "set", index, assigned], typeFromValue(expression))
+          elementType := typeFromValue(target)
+          assigned := lowerExpression(context, value.value)
+          stored := coerceValue(context, assigned, typeFromValue(value.value), elementType)
+          _ := result(context, "call-method", [array, "set", index, stored], elementType)
+          // Assignment expressions keep the checked right-hand-side type.
+          return assigned
         }
         _ -> { context.failed = "assignment target is not supported by doof-wasm"; return "" }
       }
@@ -855,7 +854,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       target := if value.targetType.resolvedType == none then "" else resolvedName(value.targetType.resolvedType!)
       sourceType := typeFromValue(value.expression)
       if sourceType == "any" { return result(context, "cast", [source, target], target) }
-      if ["byte", "short", "int", "long", "float", "double"].contains(target) { return result(context, "convert", [source], target) }
+      if ["byte", "int", "long", "float", "double"].contains(target) { return result(context, "convert", [source], target) }
       return result(context, "as", [source], target)
     }
     _ -> { context.failed = "expression is not supported by doof-wasm"; return "" }
@@ -888,7 +887,7 @@ function lowerOptionalMember(context: FunctionLowering, value: MemberExpression,
   noneContext.currentBlock.params.push(MinusValue { name: noneOwner, typeName: objectTypeName })
   presentContext.currentBlock.params.push(MinusValue { name: presentOwner, typeName: objectTypeName })
   resultType := typeFromValue(expression)
-  noneValue := result(noneContext, "const", ["none"], "none")
+  let noneValue = result(noneContext, "const", ["none"], "none")
   if resultType == "any" { noneValue = result(noneContext, "box", [noneValue], "any") }
   presentContext.nextValue = noneContext.nextValue
   presentObjectType := nonNoneTypeName(value.object.resolvedType)
@@ -897,7 +896,7 @@ function lowerOptionalMember(context: FunctionLowering, value: MemberExpression,
     return ""
   }
   presentTypedOwner := result(presentContext, "cast", [presentOwner, presentObjectType], presentObjectType)
-  presentValue := lowerMemberOnOwner(presentContext, value, presentTypedOwner)
+  let presentValue = lowerMemberOnOwner(presentContext, value, presentTypedOwner)
   actualMemberType := memberValueTypeName(value)
   if resultType == "any" && actualMemberType != "any" {
     presentValue = result(presentContext, "box", [presentValue], "any")
@@ -1068,7 +1067,7 @@ function lowerCoalesce(context: FunctionLowering, value: BinaryExpression, expre
   if presentType == "" { context.failed = "operator ?? needs a supported optional or Result value"; return "" }
   left := lowerExpression(context, value.left)
   if context.failed != "" { return "" }
-  let missing: string
+  let missing: string = ""
   if leftType!.kind == "result" {
     missing = result(context, "is", [left, RESULT_FAILURE_CLASS], "bool")
   } else {
@@ -1099,7 +1098,7 @@ function lowerCoalesce(context: FunctionLowering, value: BinaryExpression, expre
   presentContext.currentBlock.params.push(MinusValue { name: leftParamName, typeName: typeFromValue(value.left) })
   fallbackResult := lowerExpected(fallbackContext, value.right, typeFromValue(expression))
   presentContext.nextValue = fallbackContext.nextValue
-  presentResult := leftParamName
+  let presentResult = leftParamName
   if leftType!.kind == "result" {
     presentResult = result(presentContext, "get", [leftParamName, "value"], "any")
     if presentType != "any" { presentResult = result(presentContext, "cast", [presentResult, presentType], presentType) }
@@ -1274,7 +1273,11 @@ function lowerCall(context: FunctionLowering, call: CallExpression, expression: 
   let canBeClosure = call.resolvedFunction == none
   case call.callee {
     callee: Identifier -> {
-      if ["byte", "short", "int", "long", "float", "double"].contains(callee.name) { canBeClosure = false }
+      if ["byte", "int", "long", "float", "double"].contains(callee.name) { canBeClosure = false }
+    }
+    member: MemberExpression -> {
+      receiverType := typeFromValue(member.object)
+      if isArrayClass(receiverType) || receiverType == STRING_CLASS { canBeClosure = false }
     }
     _ -> { }
   }
@@ -1328,7 +1331,7 @@ function lowerCall(context: FunctionLowering, call: CallExpression, expression: 
   if closureCall { return result(context, "call-method", concatValues([receiver, "invoke"], args), typeFromValue(expression)) }
   case call.callee {
     callee: Identifier -> {
-      if ["byte", "short", "int", "long", "float", "double"].contains(callee.name) {
+      if ["byte", "int", "long", "float", "double"].contains(callee.name) {
         if args.length != 1 { context.failed = "numeric conversion requires one argument"; return "" }
         if typeFromValue(call.args[0].value) == callee.name { return args[0] }
         return result(context, "convert", [args[0]], callee.name)
@@ -1378,20 +1381,28 @@ function lowerOptionalCall(context: FunctionLowering, call: CallExpression, memb
   noneContext.currentBlock.params.push(MinusValue { name: noneOwner, typeName: typeFromValue(member.object) })
   invokeContext.currentBlock.params.push(MinusValue { name: invokeOwner, typeName: typeFromValue(member.object) })
   resultType := typeFromValue(expression)
-  noneValue := result(noneContext, "const", ["none"], "none")
+  let noneValue = result(noneContext, "const", ["none"], "none")
   if resultType == "any" { noneValue = result(noneContext, "box", [noneValue], "any") }
   invokeContext.nextValue = noneContext.nextValue
   typedOwner := result(invokeContext, "cast", [invokeOwner, receiverTypeName], receiverTypeName)
   syntheticName := "__optional_receiver_" + string(id)
   synthetic := Identifier { kind: "identifier", name: syntheticName, resolvedType: receiverType!, span: member.object.span }
-  previousObject := member.object
-  previousOptional := member.optional
-  member.object = synthetic
-  member.optional = false
+  syntheticMember := MemberExpression {
+    kind: member.kind, object: synthetic, property: member.property, optional: false, force: member.force,
+    completionPoint: member.completionPoint, resolvedStaticOwner: member.resolvedStaticOwner,
+    resolvedNamespaceAccess: member.resolvedNamespaceAccess, resolvedNamespaceSymbol: member.resolvedNamespaceSymbol,
+    resolvedMember: member.resolvedMember, resolvedCallableField: member.resolvedCallableField,
+    resolvedType: member.resolvedType, span: member.span,
+  }
+  syntheticCall := CallExpression {
+    kind: call.kind, callee: syntheticMember, args: call.args, typeArgs: call.typeArgs,
+    resolvedGenericTypeArgs: call.resolvedGenericTypeArgs, resolvedFunction: call.resolvedFunction,
+    resolvedFunctionModule: call.resolvedFunctionModule, resolvedConstructor: call.resolvedConstructor,
+    resolvedClass: call.resolvedClass, resolvedConstruction: call.resolvedConstruction,
+    resolvedType: call.resolvedType, span: call.span,
+  }
   invokeContext.bindings.push(SourceBinding { name: syntheticName, typeName: receiverTypeName, valueName: typedOwner })
-  invoked := lowerCall(invokeContext, call, expression)
-  member.object = previousObject
-  member.optional = previousOptional
+  let invoked = lowerCall(invokeContext, syntheticCall, expression)
   invokedType := callResultTypeName(call, expression)
   if resultType == "any" && invokedType != "any" { invoked = result(invokeContext, "box", [invoked], "any") }
   if invokeContext.failed != "" { context.failed = invokeContext.failed; return "" }
@@ -1450,6 +1461,10 @@ function lowerExpected(context: FunctionLowering, expression: Expression, expect
   value := lowerExpression(context, expression)
   if context.terminated || context.failed != "" { return "" }
   actual := typeFromValue(expression)
+  return coerceValue(context, value, actual, expected)
+}
+
+function coerceValue(context: FunctionLowering, value: string, actual: string, expected: string): string {
   if actual == expected { return value }
   if expected == "any" && actual != "any" {
     if context.interfaceNames.contains(actual) {
@@ -1459,8 +1474,8 @@ function lowerExpected(context: FunctionLowering, expression: Expression, expect
     return result(context, "box", [value], "any")
   }
   if context.interfaceNames.contains(expected) { return result(context, "as", [value], expected) }
-  if ["byte", "short", "int", "long", "float", "double"].contains(expected) &&
-      ["byte", "short", "int", "long", "float", "double"].contains(actual) {
+  if ["byte", "int", "long", "float", "double"].contains(expected) &&
+      ["byte", "int", "long", "float", "double"].contains(actual) {
     return result(context, "convert", [value], expected)
   }
   return value
@@ -1472,7 +1487,7 @@ function callParameterType(call: CallExpression, index: int): string {
   }
   case call.callee {
     callee: Identifier -> {
-      if ["byte", "short", "int", "long", "float", "double"].contains(callee.name) { return "" }
+      if ["byte", "int", "long", "float", "double"].contains(callee.name) { return "" }
     }
     _ -> { }
   }
@@ -1492,6 +1507,12 @@ function callParameterType(call: CallExpression, index: int): string {
           _ -> { }
         }
       }
+    }
+  }
+  if call.callee.resolvedType != none {
+    case call.callee.resolvedType! {
+      function_: FunctionType -> { if index < function_.params.length { return resolvedName(function_.params[index].type_) } }
+      _ -> { }
     }
   }
   return ""

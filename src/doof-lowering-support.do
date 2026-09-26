@@ -97,7 +97,7 @@ export function closureTypeLabel(type_: ResolvedType): string {
 
 export function supportedUnionMember(type_: ResolvedType): bool {
   case type_ {
-    primitive: PrimitiveType -> { return ["bool", "char", "byte", "short", "int", "long", "float", "double", "string"].contains(primitive.name) }
+    primitive: PrimitiveType -> { return ["bool", "char", "byte", "int", "long", "float", "double", "string"].contains(primitive.name) }
     _: ClassType -> { return true }
     _: EnumType -> { return true }
     _: SerialValueResolvedType -> { return true }

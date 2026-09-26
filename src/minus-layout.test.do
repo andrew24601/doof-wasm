@@ -7,18 +7,18 @@ export function testPackedClassLayout(): none {
         MinusField { name: "byte", typeName: "byte" },
         MinusField { name: "integer", typeName: "int" },
         MinusField { name: "flag", typeName: "bool" },
-        MinusField { name: "short", typeName: "short" },
+        MinusField { name: "secondByte", typeName: "byte" },
         MinusField { name: "double", typeName: "double" },
         MinusField { name: "long", typeName: "long" },
         MinusField { name: "unit", typeName: "none" },
         MinusField { name: "boxed", typeName: "any" },
         MinusField { name: "character", typeName: "char" },
     ] }
-    offsets: int[] := [8, 12, 16, 18, 24, 32, 40, 40, 44]
+    offsets: int[] := [8, 12, 16, 17, 24, 32, 40, 40, 44]
     for index of 0..<offsets.length { Assert.equal(classFieldOffset(class_, index), offsets[index]) }
     Assert.equal(classSize(class_), 56)
     Assert.equal(fieldWidth("byte"), 1)
-    Assert.equal(fieldWidth("short"), 2)
+    Assert.equal(fieldWidth("char"), 1)
     Assert.equal(fieldWidth("any"), 4)
     Assert.equal(fieldWidth("double"), 8)
     Assert.equal(fieldWidth("none"), 0)

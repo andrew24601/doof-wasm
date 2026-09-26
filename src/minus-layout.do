@@ -9,7 +9,6 @@ readonly BLOCK_SIZE_STEP = 16
 export function fieldWidth(typeName: string): int {
     if typeName == "none" { return 0 }
     if typeName == "bool" || typeName == "byte" { return 1 }
-    if typeName == "short" { return 2 }
     if typeName == "long" || typeName == "double" { return 8 }
     if typeName == "char" { return 1 }
     return 4 // int, float, class, interface, any

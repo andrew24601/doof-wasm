@@ -1,6 +1,6 @@
 # doof-- to WebAssembly
 
-This package compiles **doof--**, a small textual, typed block language, to executable WebAssembly. The compiler and CLI are written in Doof. Its first supported types are `none`, `bool`, `char`, `byte`, `short`, `int`, `long`, `float`, `double`, concrete classes, explicit interfaces, and tagged `any`. Class instances and `any` boxes use compiler-inserted reference counting.
+This package compiles **doof--**, a small textual, typed block language, to executable WebAssembly. The compiler and CLI are written in Doof. Its first supported types are `none`, `bool`, `char`, `byte`, `int`, `long`, `float`, `double`, concrete classes, explicit interfaces, and tagged `any`. Class instances and `any` boxes use compiler-inserted reference counting.
 
 The `doof-wasm` source compiler is the first Doof-facing layer over this IR.
 It accepts a checked Doof module graph and lowers its supported scalar,
@@ -19,8 +19,9 @@ a shared mutable cell so writes from either side remain visible. The CLI resolve
   enums, arrays of class and interface references (including strings, nested
   arrays, and `any` unions), and type aliases
   whose resolved types are supported by the backend. Supported arrays have
-  literals, `.length`, indexed reads and writes, and are limited to 1024
-  payload bytes. Basic strings are represented by an injected string class over a
+  literals, `.length`, indexed reads and writes, `.push(value)` on mutable
+  arrays, and `.contains(value)`. Small arrays use compact blocks; larger arrays
+  grow in 1024-byte chunks. Basic strings are represented by an injected string class over a
   read-only `char[]` wrapper. Distinct string literals are built once when the
   Wasm module starts and shared; `.length`, indexed character reads,
   content-based comparison operators, `.compare(other)`, `.indexOf(search)`,

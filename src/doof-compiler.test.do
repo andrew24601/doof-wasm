@@ -17,6 +17,36 @@ function runWasm(bytes: byte[], name: string, script: string): none {
   Assert.equal(result.exitCode, 0)
 }
 
+function runSourceWithBindings(source: string, name: string, script: string): none {
+  module_ := try! lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  bytes := try! encodeDoofMinus(module_, true)
+  wasmPath := "/tmp/doof-source-arrays-" + string(pid()) + "-" + name + ".wasm"
+  jsPath := "/tmp/doof-source-arrays-" + string(pid()) + "-" + name + ".mjs"
+  try! writeBlob(wasmPath, bytes.cloneReadonly())
+  try! writeText(jsPath, renderDoofJs(module_, true))
+  result := try! run("node", ["-e", `
+const fs = require('fs'), assert = require('assert'), {pathToFileURL} = require('url');
+(async () => {
+  const ffi = await import(pathToFileURL(process.argv[2]).href);
+  const bytes = fs.readFileSync(process.argv[1]);
+  ${script}
+})().catch(error => { console.error(error); process.exit(1); });
+`, wasmPath, jsPath], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
+  _ := remove(wasmPath) else { panic("Could not remove temporary Wasm file") }
+  _ := remove(jsPath) else { panic("Could not remove temporary JavaScript file") }
+  if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
+  Assert.equal(result.exitCode, 0)
+}
+
+function repeatedArrayElements(element: string, length: int): string {
+  let elements = ""
+  for index of 0..<length {
+    if index > 0 { elements += "," }
+    elements += element
+  }
+  return elements
+}
+
 export function testHostStringImportsAndGeneratedBindingsEndToEnd(): none {
   sources := [SourceFile {
     path: "/main.do",
@@ -232,7 +262,7 @@ export function testExecutesByteArrayReadsWritesBoundsAndFinalRelease(): none {
   runWasm(bytes, "byte-array", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;for(let i=0;i<1000;i++)if(e.main()!==268)process.exit(1);try{e.bounds();process.exit(2)}catch(x){if(!(x instanceof WebAssembly.RuntimeError))process.exit(3)}`)
 }
 
-export function testArraySourcePayloadLimitAndPrimitiveAndEnumElements(): none {
+export function testArraySourceChunkingAndPrimitiveAndEnumElements(): none {
   let values = ""
   for index of 0..<1025 {
     if index > 0 { values += "," }
@@ -242,11 +272,183 @@ export function testArraySourcePayloadLimitAndPrimitiveAndEnumElements(): none {
     SourceFile { path: "/main.do", source: "function main(): none { values: byte[] := [" + values + "] }" },
   ], "/main.do")
   case tooLong {
-    failure: Failure<string> -> { Assert.stringContains(failure.error, "limited to 1024") }
-    _ -> { Assert.fail("Expected an oversized byte[] literal to be rejected") }
+    failure: Failure<string> -> { Assert.fail("Expected an oversized byte[] literal to lower: " + failure.error) }
+    _ -> { }
   }
   bytes := try! compileDoofWasmSources([
     SourceFile { path: "/main.do", source: "enum Kind { First = 2, Last = 9 }\nexport function primitivePart(): int { values: int[] := [1, 2, 3]\nvalues[1] = 7\nreturn values[0] + values[1] + values[2] + values.length }\nexport function enumPart(): int { kinds: Kind[] := [Kind.First, Kind.Last]\nkinds[0] = Kind.Last\nreturn kinds[0].value + kinds[1].value + kinds.length }\nexport function main(): int { return primitivePart() + enumPart() }" },
   ], "/main.do")
   runWasm(bytes, "primitive-enum-arrays", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;const actual=e.main();if(actual!==34)throw new Error("expected 34, got "+actual)`)
+}
+
+export function testSourceArraysAllSupportedWidthsThroughBindingsAndDestruction(): none {
+  types := ["bool", "char", "byte", "int", "float", "long", "double", "Kind"]
+  initial := ["false", "'a'", "byte(1)", "-1234567", "float(1.25)", "9007199254740993L", "3.125", "Kind.First"]
+  replacement := ["true", "'z'", "byte(255)", "1234567", "float(2.5)", "9007199254740995L", "6.25", "Kind.Last"]
+  for typeIndex of 0..<types.length {
+    typeName := types[typeIndex]
+    width := if typeIndex < 3 then 1 else if typeName == "long" || typeName == "double" then 8 else 4
+    capacity := 1024 \ width
+    let source = `
+import function checkpoint(length: int): none
+enum Kind { First = 2, Last = 9 }
+function verify(values: ${typeName}[], length: int): bool {
+  if values.length != length { return false }
+  for value of values { if value != ${initial[typeIndex]} { return false } }
+  if length > 0 {
+    values[0] = ${replacement[typeIndex]}
+    values[length - 1] = ${replacement[typeIndex]}
+    if values[0] != ${replacement[typeIndex]} { return false }
+    if values[length - 1] != ${replacement[typeIndex]} { return false }
+  }
+  if length > ${capacity} {
+    values[${capacity - 1}] = ${replacement[typeIndex]}
+    values[${capacity}] = ${replacement[typeIndex]}
+    if values[${capacity - 1}] != ${replacement[typeIndex]} { return false }
+    if values[${capacity}] != ${replacement[typeIndex]} { return false }
+  }
+  checkpoint(length)
+  return true
+}
+`
+    for length of [0, capacity, capacity + 1, capacity * 2, capacity * 2 + 1] {
+      elements := repeatedArrayElements(initial[typeIndex], length)
+      source += `
+function make_${length}(): ${typeName}[] { values: ${typeName}[] := [${elements}]
+  return values }
+export function case_${length}(): bool => verify(make_${length}(), ${length})
+`
+    }
+    source += `
+export function bounds(index: int): ${typeName} { values := make_${capacity + 1}()
+  return values[index] }
+export function writeBounds(index: int): none { values := make_${capacity + 1}()
+  values[index] = ${replacement[typeIndex]} }
+export function readonlyArray(): bool {
+  readonly values: ${typeName}[] = [${repeatedArrayElements(initial[typeIndex], capacity + 1)}]
+  for value of values { if value != ${initial[typeIndex]} { return false } }
+  return values.length == ${capacity + 1}
+}
+`
+    runSourceWithBindings(source, "width-" + typeName, `
+let heap, calls = 0;
+const bridge = ffi.createDoofImports({checkpoint(length) {
+  calls++;
+  const blocks = heap.dumpHeap();
+  const raw = blocks.find(block => (block.kind === 'array-data' || block.kind === 'array-descriptor') && block.length === length);
+  assert(raw, 'source array must be visible while its wrapper is alive');
+  assert.strictEqual(raw.kind, length <= ${capacity} ? 'array-data' : 'array-descriptor');
+  if (length > ${capacity}) assert.strictEqual(raw.chunkCount, Math.ceil(length / ${capacity}));
+}});
+const {instance} = await WebAssembly.instantiate(bytes, bridge.imports); bridge.attach(instance);
+heap = ffi.createDoofHeapInspector(instance);
+const api = ffi.createDoofModule(instance);
+for (const length of [0,${capacity},${capacity + 1},${capacity * 2},${capacity * 2 + 1}]) {
+  assert.strictEqual(api['case_'+length](), true);
+  assert(heap.dumpHeap().every(block => block.kind === 'free'), 'wrappers and data must be destroyed');
+  const end = instance.exports.__doof_debug_heap_end.value;
+  for (let repeat = 0; repeat < 10; repeat++) assert.strictEqual(api['case_'+length](), true);
+  assert.strictEqual(instance.exports.__doof_debug_heap_end.value,end,'repeated source calls must reuse storage');
+}
+assert.strictEqual(calls,55);
+assert.strictEqual(api.readonlyArray(),true);
+assert(heap.dumpHeap().every(block => block.kind === 'free'));
+// Trapping calls use separate instances: Wasm traps do not unwind reference locals.
+for (const name of ['bounds','writeBounds']) for (const index of [-1,${capacity + 1}]) {
+  const other = await WebAssembly.instantiate(bytes, bridge.imports);
+  assert.throws(() => ffi.createDoofModule(other.instance)[name](index), WebAssembly.RuntimeError);
+}
+`)
+  }
+}
+
+export function testSourceReferenceArraysAndNestedArraysThroughBindings(): none {
+  types := ["Box", "HasValue", "Box | int | none", "int[]", "string"]
+  declarations := ["item := Box { value: 7 }", "item := Box { value: 7 }", "item := Box { value: 7 }", "item: int[] := [" + repeatedArrayElements("7", 257) + "]", "item := \"first\""]
+  replacement := ["Box { value: 99 }", "Box { value: 99 }", "99", "[" + repeatedArrayElements("99", 257) + "]", "\"last\""]
+  readInitial := ["values[index].value", "values[index].value", "read(values[index])", "values[index][0]", "values[index].length"]
+  readChanged := ["values[0].value", "values[0].value", "read(values[0])", "values[0][0]", "values[0].length"]
+  readNeighbor := ["values[2].value", "values[2].value", "read(values[2])", "values[2][0]", "values[2].length"]
+  readAssigned := ["assigned.value", "assigned.value", "assigned", "assigned[0]", "assigned.length"]
+  for typeIndex of 0..<types.length {
+    typeName := types[typeIndex]
+    let source = `
+import function checkpoint(): none
+interface HasValue { value: int }
+class Box implements HasValue { value: int }
+function read(value: Box | int | none): int {
+  case value { box: Box -> { return box.value }, number: int -> { return number }, none -> { return -1 } }
+}
+
+function verify(values: (${typeName})[], length: int): bool {
+  if values.length != length { return false }
+  for index of 0..<length { if ${readInitial[typeIndex]} != ${if typeName == "string" then 5 else 7} { return false } }
+  assigned := values[0] = ${replacement[typeIndex]}
+  if ${readAssigned[typeIndex]} != ${if typeName == "string" then 4 else 99} { return false }
+  values[length - 1] = values[0]
+  values[0] = values[0]
+  if ${readChanged[typeIndex]} != ${if typeName == "string" then 4 else 99} { return false }
+  if ${readNeighbor[typeIndex]} != ${if typeName == "string" then 5 else 7} { return false }
+  checkpoint()
+  return true
+}
+`
+    for length of [4, 257, 513] {
+      elements := repeatedArrayElements("item", length)
+      source += `
+function make_${length}(): (${typeName})[] { ${declarations[typeIndex]}
+  values: (${typeName})[] := [${elements}]
+  return values }
+export function case_${length}(): bool => verify(make_${length}(), ${length})
+`
+    }
+    if typeIndex == 2 {
+      source += `
+export function unionNone(): int {
+  values: (Box | int | none)[] := [none, 1, Box { value: 7 }]
+  values[1] = none
+  return read(values[0]) + read(values[1])
+}
+`
+    }
+    runSourceWithBindings(source, "references-" + string(typeIndex), `
+let heap, calls = 0;
+const bridge = ffi.createDoofImports({checkpoint() {
+  calls++;
+  assert(heap.dumpHeap().some(block => block.kind === 'class' && block.fields.data), 'array wrapper must be alive');
+}});
+const {instance} = await WebAssembly.instantiate(bytes, bridge.imports); bridge.attach(instance);
+heap = ffi.createDoofHeapInspector(instance); const api = ffi.createDoofModule(instance);
+function live() { return heap.dumpHeap().filter(block => block.kind !== 'free').map(block => [block.address,block.kind,block.refCount]); }
+const baseline = live();
+for (const length of [4,257,513]) {
+  assert.strictEqual(api['case_'+length](),true);
+  assert.deepStrictEqual(live(),baseline,'only pooled string literals may remain alive');
+  const end = instance.exports.__doof_debug_heap_end.value;
+  for (let repeat = 0; repeat < 30; repeat++) {
+    assert.strictEqual(api['case_'+length](),true);
+    assert.deepStrictEqual(live(),baseline,'reference elements and nested wrappers must be released');
+  }
+  assert.strictEqual(instance.exports.__doof_debug_heap_end.value,end,'reference arrays must reuse storage');
+}
+assert.strictEqual(calls,93);
+if (api.unionNone) { assert.strictEqual(api.unionNone(),-2); assert.deepStrictEqual(live(),baseline); }
+`)
+  }
+}
+
+export function testOptionalArrayOwnerCallsAndCoalescing(): none {
+  bytes := try! compileDoofWasmSources([SourceFile { path: "/main.do", source: `
+class Box { values: int[]
+  value: int
+  count(): int => this.values.length }
+function count(box: Box | none): int => box?.count() ?? 0
+function value(box: Box | none): int => box?.value ?? 0
+export function main(): int {
+  box := Box { values: [7, 8], value: 7 }
+  return count(box) + count(none) + value(box) + value(none)
+}
+
+` }], "/main.do")
+  runWasm(bytes, "optional-array-owner", `const e=new WebAssembly.Instance(new WebAssembly.Module(require('fs').readFileSync(process.argv[1]))).exports;require('assert').strictEqual(e.main(),9);`)
 }

@@ -4,7 +4,7 @@ doof-- is a lowered, typed, line-oriented language. It is the input to this pack
 
 ## Types
 
-The built-in types are `none`, `bool`, `char`, `byte`, `short`, `int`, `long`, `float`, `double`, and `any`. `any` is a tagged value carrier, not a class. Other type names must name a class or interface in the module.
+The built-in types are `none`, `bool`, `char`, `byte`, `int`, `long`, `float`, `double`, and `any`. `any` is a tagged value carrier, not a class. Other type names must name a class or interface in the module.
 
 | Type | Meaning | Wasm carrier |
 | --- | --- | --- |
@@ -12,7 +12,6 @@ The built-in types are `none`, `bool`, `char`, `byte`, `short`, `int`, `long`, `
 | `bool` | `true` or `false` | i32, zero or one |
 | `char` | Unsigned single-byte character value (0–255) | i32 |
 | `byte` | Unsigned 8-bit integer | i32 |
-| `short` | Signed 16-bit integer | i32 |
 | `int` | Signed 32-bit integer | i32 |
 | `long` | Signed 64-bit integer | i64 |
 | `float` | IEEE 754 binary32 | f32 |
@@ -89,7 +88,7 @@ Supported instructions are:
 | --- | --- |
 | `%r:T = const literal` | Primitive constant; `char` uses a decimal byte value |
 | `%r:T = add/sub/mul/div %a, %b` | Matching numeric operands and result |
-| `%r:bool = eq/lt %a, %b` | Matching numeric operands; `eq` also accepts `bool`, `char`, and `none`; `lt` also accepts `char` |
+| `%r:bool = eq/lt %a, %b` | Matching numeric operands; `eq` also accepts `bool`, `char`, `none`, enums, references, and `any`; `lt` also accepts `char` |
 | `%r:T = convert %a` | Explicit conversion between numeric types |
 | `%r:T = copy %a` | Copy a value; retains references |
 | `%r:C = new C(%a, ...)` | Allocate a class; arguments follow field order |
@@ -97,6 +96,7 @@ Supported instructions are:
 | `array-free %handle[, T]` | Release reference elements when `T` is a class, interface, or `any`, then return the block to the allocator |
 | `%r:int = array-length %handle` | Read the array element count |
 | `%r:T = array-get %handle, %index` | Bounds-checked read; retains class, interface, and `any` values |
+| `%r:int = array-push %handle, %value` | Append an element, retaining references; returns the possibly changed handle, replacing the old uniquely owned handle |
 | `array-set %handle, %index, %value` | Bounds-checked write; retains the new reference and releases the replaced reference |
 | `%r:T = get %object.field` | Read a class or interface field |
 | `set %object.field = %value` | Replace a mutable field |
@@ -112,13 +112,20 @@ Supported instructions are:
 | `return` / `return %value` | Return `none` / a typed value |
 | `panic` | Trap execution with the Wasm `unreachable` instruction |
 
-Array element types are `bool`, `char`, `byte`, `short`, `int`, `long`, `float`,
+Array element types are `bool`, `char`, `byte`, `int`, `long`, `float`,
 `double`, enums, `any`, and declared classes or interfaces. Reference elements
 are stored as four-byte pointers. To release a reference array correctly, pass
 its element type to `array-free`, for example `array-free %handle, Widget`; the
 one-argument form remains valid for primitive and enum arrays. Array lengths
-must be nonnegative, and allocated storage is limited to 1024 payload bytes.
-Negative lengths, oversized allocations, invalid handles, and out-of-range
+must be nonnegative. Push traps at the signed `int` length limit and preserves
+element ownership while moving a small payload to a larger block or chunks.
+References compare by identity with `eq`; `any` compares matching nominal tags
+and typed payloads (including string content). Payloads above 1024 bytes use 1024-byte chunks behind a
+three-level, 256-way radix directory. Their descriptor stores logical length
+separately from allocated chunk count so a future append operation can add
+chunks without relocating existing elements. The maximum logical length is
+the signed `int` limit, subject to available Wasm memory. Negative lengths,
+oversized allocations, invalid handles, and out-of-range
 indexes trap. These operations are compiler-lowering primitives; source Doof
 code reaches them through generated wrapper classes.
 

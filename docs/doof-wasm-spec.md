@@ -14,7 +14,7 @@ the full Doof compiler.
   when a class is constructed with positional or named arguments, plus
   explicit interface implementations.
 - Interfaces with fields and method signatures.
-- `none`, `bool`, `char`, `byte`, `short`, `int`, `long`, `float`, `double`,
+- `none`, `bool`, `char`, `byte`, `int`, `long`, `float`, `double`,
   `string`, integer-backed enums, classes, interfaces, `SerialValue`, and union
   types (lowered to doof-- `any`), including aliases that resolve to supported
   types. `Result<T, E>` is represented as an `any` union of `Success<T>` and
@@ -22,12 +22,18 @@ the full Doof compiler.
   `error` fields hold boxed payloads. Type captures recover the payload's
   checked type when reading those fields. Enum tags remain distinct from
   integer tags inside `any` unions.
-- Mutable and read-only arrays of `bool`, `char`, `byte`, `short`, `int`,
+- Mutable and read-only arrays of `bool`, `char`, `byte`, `int`,
   `long`, `float`, `double`, enums, class and interface references, and `any`
   unions. This includes strings and nested arrays when their element types are
   supported. Arrays support literals, `.length`, indexed reads, and indexed
-  writes on mutable arrays. Payloads are limited to 1024 bytes, so the maximum
-  element count depends on element width. Other collection types remain
+  writes and `.push(value)` on mutable arrays, and `.contains(value)` on both
+  mutable and read-only arrays. Push preserves aliases, grows small blocks
+  geometrically, and migrates to chunks when the payload exceeds 1024 bytes.
+  Contains compares primitives and enums by value, strings by content, and
+  class, interface, and nested-array references by identity. Union elements
+  compare their nominal tags and payload values. Larger arrays use fixed-size chunks behind a
+  bounded-depth radix directory and can grow to the signed `int` length limit,
+  subject to available Wasm memory. Other collection types remain
   unsupported by source lowering.
 - Basic `string` values backed by an injected string class and a wrapped,
   read-only `char[]`; string literals, `.length`, and indexed character reads

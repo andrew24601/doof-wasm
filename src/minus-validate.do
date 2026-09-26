@@ -34,10 +34,10 @@ function blockByName(function_: MinusFunction, name: string): MinusBlock | none 
     return none
 }
 
-function primitive(typeName: string): bool => ["none", "bool", "char", "byte", "short", "int", "long", "float", "double"].contains(typeName)
-function numeric(typeName: string): bool => ["byte", "short", "int", "long", "float", "double"].contains(typeName)
+function primitive(typeName: string): bool => ["none", "bool", "char", "byte", "int", "long", "float", "double"].contains(typeName)
+function numeric(typeName: string): bool => ["byte", "int", "long", "float", "double"].contains(typeName)
 function reference(module_: MinusModule, typeName: string): bool => typeName == "any" || classByName(module_, typeName) != none || interfaceByName(module_, typeName) != none
-function arrayElementType(module_: MinusModule, typeName: string): bool => ["bool", "char", "byte", "short", "int", "long", "float", "double"].contains(typeName) || reference(module_, typeName) || enumByName(module_, typeName) != none
+function arrayElementType(module_: MinusModule, typeName: string): bool => ["bool", "char", "byte", "int", "long", "float", "double"].contains(typeName) || reference(module_, typeName) || enumByName(module_, typeName) != none
 function hostExportType(module_: MinusModule, typeName: string): bool => !reference(module_, typeName) || typeName == "__doof_string"
 
 function identifier(name: string): bool {
@@ -112,9 +112,8 @@ function checkLiteral(module_: MinusModule, instruction: MinusInstruction, typeN
         return Failure(problem(instruction.line, "invalid " + typeName + " constant"))
     }
     if typeName == "byte" { _ := parseByte(literal) else { return Failure(problem(instruction.line, "invalid byte constant")) }; return Success(none) }
-    if typeName == "short" || typeName == "int" || typeName == "char" {
+    if typeName == "int" || typeName == "char" {
         parsed := parseInt(literal) else { return Failure(problem(instruction.line, "invalid integer constant")) }
-        if typeName == "short" && (parsed < -32768 || parsed > 32767) { return Failure(problem(instruction.line, "short constant out of range")) }
         if typeName == "char" && (parsed < 0 || parsed > 255) { return Failure(problem(instruction.line, "char constant must fit in one UTF-8 byte")) }
         return Success(none)
     }
@@ -149,7 +148,7 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         if args.length != 2 { return Failure(problem(line, op + " needs two operands")) }
         try left := valueType(values, args[0], line)
         try right := valueType(values, args[1], line)
-        if left != right || (!numeric(left) && !(op == "eq" && (left == "bool" || left == "char" || left == "none" || enumByName(module_, left) != none)) && !(op == "lt" && left == "char")) {
+        if left != right || (!numeric(left) && !(op == "eq" && (left == "bool" || left == "char" || left == "none" || reference(module_, left) || enumByName(module_, left) != none)) && !(op == "lt" && left == "char")) {
             return Failure(problem(line, op + " needs matching supported operands"))
         }
         return Success(if op == "eq" || op == "lt" then "bool" else left)
@@ -190,6 +189,14 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         if handleType != "int" || indexType != "int" { return Failure(problem(line, "array-get needs int handle and index")) }
         if !arrayElementType(module_, resultType) { return Failure(problem(line, "unsupported array element type " + resultType)) }
         return Success(resultType)
+    }
+    if op == "array-push" {
+        if args.length != 2 { return Failure(problem(line, "array-push needs a block handle and value")) }
+        try handleType := valueType(values, args[0], line)
+        try elementType := valueType(values, args[1], line)
+        if handleType != "int" { return Failure(problem(line, "array-push needs an int block handle")) }
+        if !arrayElementType(module_, elementType) { return Failure(problem(line, "unsupported array element type " + elementType)) }
+        return Success("int")
     }
     if op == "array-set" {
         if args.length != 3 { return Failure(problem(line, "array-set needs a block handle, index, and value")) }

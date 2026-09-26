@@ -62,13 +62,30 @@ function rejected(source: string, message: string): none {
     }
 }
 
+export function testRejectsRemovedShortType(): none {
+    rejected(`export func old(%value:short) -> int
+block entry
+%zero:int = const 0
+return %zero
+end`, "unknown type short")
+    rejected(`class Legacy
+field value:short
+end`, "unknown type short")
+    rejected(`export func old() -> int
+block entry
+%one:int = const 1
+%data:int = array-alloc %one, short
+return %data
+end`, "unsupported array element type short")
+}
+
 export function testPrimitiveExecution(): none {
     runWasm(`
-export func shortSum() -> short
+export func intSum() -> int
 block entry
-%a:short = const 32767
-%b:short = const 1
-%c:short = add %a, %b
+%a:int = const 2147483647
+%b:int = const 1
+%c:int = add %a, %b
 return %c
 end
 export func floatValue() -> float
@@ -104,7 +121,7 @@ block entry
 %a:char = const 255
 return %a
 end
-`, "primitives", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.shortSum()!==-32768||e.floatValue()!==3.75||e.doubleValue()!==3.75||e.longValue()!==10000000007n||e.byteValue()!==0||e.charValue()!==255)process.exit(1)`)
+`, "primitives", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.intSum()!==-2147483648||e.floatValue()!==3.75||e.doubleValue()!==3.75||e.longValue()!==10000000007n||e.byteValue()!==0||e.charValue()!==255)process.exit(1)`)
 }
 
 export function testTypedArrayDataOperationsAndFreeListReuse(): none {
@@ -137,13 +154,20 @@ block entry
 array-free %bytes
 return %count
 end
-export func tooLarge() -> int
+export func longArray() -> int
 block entry
-%length:int = const 1025
+%length:int = const 2050
 %bytes:int = array-alloc %length, byte
-return %length
+%zero:int = const 0
+%last:int = const 2049
+%value:byte = const 219
+array-set %bytes, %last, %value
+%actual:byte = array-get %bytes, %last
+%count:int = array-length %bytes
+array-free %bytes
+return %count
 end
-`, "array-data", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;for(let i=0;i<1000;i++)if(e.onlyLength()!==3||e.run()!==3)process.exit(1);if(e.maximum()!==1024)process.exit(2);try{e.tooLarge();process.exit(3)}catch(x){if(!(x instanceof WebAssembly.RuntimeError))process.exit(4)}`)
+`, "array-data", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;for(let i=0;i<1000;i++)if(e.onlyLength()!==3||e.run()!==3)process.exit(1);if(e.maximum()!==1024||e.longArray()!==2050)process.exit(2)`)
 }
 
 export function testTypedPrimitiveArrayWidths(): none {
@@ -152,12 +176,11 @@ export func mixed() -> int
 block entry
 %one:int = const 1
 %zero:int = const 0
-%shorts:int = array-alloc %one, short
-%shortValue:short = const -123
-array-set %shorts, %zero, %shortValue
-%readShort:short = array-get %shorts, %zero
-%shortAsInt:int = convert %readShort
-array-free %shorts
+%ints:int = array-alloc %one, int
+%intValue:int = const -123
+array-set %ints, %zero, %intValue
+%readInt:int = array-get %ints, %zero
+array-free %ints
 %longs:int = array-alloc %one, long
 %longValue:long = const 4000000000
 array-set %longs, %zero, %longValue
@@ -176,12 +199,167 @@ array-set %floats, %zero, %floatValue
 %readFloat:float = array-get %floats, %zero
 %floatAsInt:int = convert %readFloat
 array-free %floats
-%first:int = add %shortAsInt, %longAsInt
+%first:int = add %readInt, %longAsInt
 %sum:int = add %first, %doubleAsInt
 %total:int = add %sum, %floatAsInt
 return %total
 end
 `, "typed-array-data", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.mixed()!==-294967415)process.exit(1)`)
+}
+
+export function testChunkedArraysAcrossWidthsAndDirectoryBoundaries(): none {
+    let source = "enum Kind\nend\n"
+    for typeName of ["bool", "char", "byte", "int", "float", "long", "double", "Kind"] {
+        source += `
+export func alloc_${typeName}(%length:int) -> int
+block entry
+%data:int = array-alloc %length, ${typeName}
+return %data
+end
+export func read_${typeName}(%data:int, %index:int) -> ${typeName}
+block entry
+%value:${typeName} = array-get %data, %index
+return %value
+end
+export func write_${typeName}(%data:int, %index:int, %value:${typeName}) -> none
+block entry
+array-set %data, %index, %value
+return
+end
+`
+    }
+    source += `
+export func length(%data:int) -> int
+block entry
+%length:int = array-length %data
+return %length
+end
+export func free(%data:int) -> none
+block entry
+array-free %data
+return
+end
+`
+    runWasm(source, "chunked-widths", `
+const fs = require('fs'), assert = require('assert');
+const bytes = fs.readFileSync(process.argv[1]);
+for (const [type,width,value] of [['bool',1,1],['char',1,200],['byte',1,201],['int',4,123456789],['float',4,1.25],['long',8,9007199254740993n],['double',8,Math.PI],['Kind',4,123456789]]) {
+  const e = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
+  const capacity = 1024 / width;
+  const lengths = [0,1,capacity-1,capacity,capacity+1,capacity*2,capacity*2+1,capacity*256+1];
+  if (type === 'byte') lengths.push(capacity*65536+1);
+  function trap(action) { assert.throws(action, WebAssembly.RuntimeError); }
+  trap(() => e['alloc_'+type](-1));
+  for (const length of lengths) {
+    const data = e['alloc_'+type](length), view = new DataView(e.__doof_ffi_memory.buffer);
+    assert.strictEqual(e.length(data), length);
+    assert.strictEqual(view.getUint16(data,true), length <= capacity ? 30 : 29);
+    if (length > capacity) {
+      assert.strictEqual(view.getUint32(data+8,true), Math.ceil(length/capacity));
+      const owned = new Set(); let pointer = view.getUint32(data+16,true), chunks = 0;
+      while (pointer) {
+        assert(!owned.has(pointer), 'ownership chain cycle'); owned.add(pointer);
+        if (view.getUint16(pointer,true) === 27) chunks++;
+        pointer = view.getUint32(pointer+4,true);
+      }
+      assert.strictEqual(chunks, Math.ceil(length/capacity));
+    }
+    const indexes = [...new Set([0,capacity-1,capacity,capacity+1,capacity*256-1,capacity*256,capacity*65536-1,capacity*65536,length-1])].filter(i => i >= 0 && i < length);
+    const expected = new Map();
+    for (const [ordinal,index] of indexes.entries()) {
+      const item = type === 'bool' ? ordinal%2 : typeof value === 'bigint' ? value+BigInt(ordinal) : value+ordinal;
+      e['write_'+type](data,index,item); expected.set(index,item);
+    }
+    for (const [index,item] of expected) assert.strictEqual(e['read_'+type](data,index),item, type+' index '+index);
+    for (const index of [-1,length]) {
+      trap(() => e['read_'+type](data,index));
+      trap(() => e['write_'+type](data,index,value));
+    }
+    e.free(data);
+    // Reuse the exact descriptor and block sizes, checking both leaks and cycles.
+    const heapPages = e.__doof_ffi_memory.buffer.byteLength;
+    for (let repeat = 0; repeat < 3; repeat++) {
+      const reused = e['alloc_'+type](length);
+      if (length) { e['write_'+type](reused,length-1,value); assert.strictEqual(e['read_'+type](reused,length-1),value); }
+      e.free(reused);
+      assert.strictEqual(e.__doof_ffi_memory.buffer.byteLength,heapPages);
+    }
+  }
+}
+`)
+}
+
+export function testReferenceArraysReplaceReleaseAndReuse(): none {
+    let source = `
+interface HasValue
+field value:int
+end
+class Widget implements HasValue
+field value:int
+end
+`
+    for typeName of ["Widget", "HasValue", "any"] {
+        conversion := if typeName == "Widget" then "copy %object" else if typeName == "HasValue" then "as %object" else "box %object"
+        source += `
+export func alloc_${typeName}(%length:int) -> int
+block entry
+%data:int = array-alloc %length, ${typeName}
+return %data
+end
+export func write_${typeName}(%data:int, %index:int, %value:int) -> none
+block entry
+%object:Widget = new Widget(%value)
+%element:${typeName} = ${conversion}
+array-set %data, %index, %element
+return
+end
+export func self_${typeName}(%data:int, %index:int) -> none
+block entry
+%element:${typeName} = array-get %data, %index
+array-set %data, %index, %element
+return
+end
+export func free_${typeName}(%data:int) -> none
+block entry
+array-free %data, ${typeName}
+return
+end
+`
+    }
+    runCappedWasm(source, "reference-array-reuse", `
+const fs = require('fs'), assert = require('assert');
+const e = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
+const view = new DataView(e.__doof_ffi_memory.buffer);
+function slot(data,index) {
+  if (view.getUint16(data,true) === 30) return data+8+index*4;
+  const chunk = Math.floor(index/256); let node = view.getUint32(data+12,true);
+  node = view.getUint32(node+8+(chunk>>>16)*4,true);
+  node = view.getUint32(node+8+((chunk>>>8)&255)*4,true);
+  node = view.getUint32(node+8+(chunk&255)*4,true);
+  return node+8+(index%256)*4;
+}
+for (const type of ['Widget','HasValue','any']) for (const length of [3,256,257,513]) {
+  for (let repeat = 0; repeat < 100; repeat++) {
+    const data = e['alloc_'+type](length), indexes = [...new Set([0,2,255,256,length-1])].filter(i => i < length);
+    for (let i = 0; i < length; i++) assert.strictEqual(view.getUint32(slot(data,i),true),0);
+    for (const index of indexes) e['write_'+type](data,index,42+index);
+    const replaced = view.getUint32(slot(data,0),true), neighbor = view.getUint32(slot(data,2),true);
+    e['self_'+type](data,0);
+    assert.strictEqual(view.getUint32(replaced+4,true),1);
+    e['write_'+type](data,0,99);
+    assert.strictEqual(view.getUint16(replaced,true),0,'replaced element must be freed');
+    assert.notStrictEqual(view.getUint16(neighbor,true),0,'neighbor must remain alive');
+    const objects = [];
+    for (const index of indexes) {
+      const pointer = view.getUint32(slot(data,index),true); objects.push(pointer);
+      assert.strictEqual(view.getUint32(pointer+4,true),1);
+      if (type === 'any') objects.push(view.getUint32(pointer+16,true));
+    }
+    e['free_'+type](data);
+    for (const pointer of objects) assert.strictEqual(view.getUint16(pointer,true),0,'array element must be freed');
+  }
+}
+`)
 }
 
 export function testMinusDestructorFreesOwnedArrayData(): none {
@@ -229,7 +407,7 @@ end
 
 export function testPrimitiveHostBoundary(): none {
     runWasm(`
-export func narrow(%value:short) -> short
+export func narrow(%value:byte) -> byte
 block entry
 return %value
 end
@@ -246,7 +424,7 @@ block entry
 %empty:none = const none
 return %empty
 end
-`, "boundary", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.narrow(65535)!==-1||e.truth(7)!==1||e.character(255)!==255||e.nothing()!==undefined)process.exit(1);try{e.character(256);process.exit(2)}catch(x){if(!(x instanceof WebAssembly.RuntimeError))process.exit(3)}`)
+`, "boundary", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.narrow(65535)!==255||e.truth(7)!==1||e.character(255)!==255||e.nothing()!==undefined)process.exit(1);try{e.character(256);process.exit(2)}catch(x){if(!(x instanceof WebAssembly.RuntimeError))process.exit(3)}`)
 }
 
 export function testNumericConversionsAndComparisons(): none {
@@ -258,11 +436,11 @@ block entry
 %double:double = convert %single
 return %double
 end
-export func narrow(%value:double) -> short
+export func narrow(%value:double) -> byte
 block entry
 %integer:int = convert %value
-%short:short = convert %integer
-return %short
+%byte:byte = convert %integer
+return %byte
 end
 export func compare(%left:char,%right:char) -> bool
 block entry
@@ -274,7 +452,7 @@ block entry
 %equal:bool = eq %left,%right
 return %equal
 end
-`, "conversions", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.widen(200)!==200||e.narrow(65535)!==-1||e.compare(65,66)!==1||e.compareBool(7,1)!==1)process.exit(1)`)
+`, "conversions", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.widen(200)!==200||e.narrow(65535)!==255||e.compare(65,66)!==1||e.compareBool(7,1)!==1)process.exit(1)`)
 }
 
 export function testClassesInterfacesAndAny(): none {
@@ -486,7 +664,7 @@ export function testPackedFieldsExecute(): none {
     runWasm(`
 class Packed
 field let tiny:byte
-field let signed:short
+field let signed:int
 field let flag:bool
 field let integer:int
 field let real:double
@@ -496,7 +674,7 @@ end
 export func run() -> int
 block entry
 %small:byte = const 1
-%negative:short = const -1
+%negative:int = const -1
 %true:bool = const true
 %zero:int = const 0
 %one:double = const 1.0
@@ -504,7 +682,7 @@ block entry
 %emptyBox:any = box %empty
 %packed:Packed = new Packed(%small,%negative,%true,%zero,%one,%empty,%emptyBox)
 %replacement:byte = const 42
-%newSigned:short = const -10
+%newSigned:int = const -10
 %false:bool = const false
 %number:int = const 123456
 %double:double = const 2.25
@@ -518,7 +696,7 @@ set %packed.real = %double
 set %packed.unit = %empty
 set %packed.boxed = %box
 %b:byte = get %packed.tiny
-%s:short = get %packed.signed
+%s:int = get %packed.signed
 %flag:bool = get %packed.flag
 %i:int = get %packed.integer
 %d:double = get %packed.real
@@ -526,9 +704,8 @@ set %packed.boxed = %box
 %x:any = get %packed.boxed
 %contained:int = cast %x int
 %bi:int = convert %b
-%si:int = convert %s
 %di:int = convert %d
-%sum1:int = add %bi,%si
+%sum1:int = add %bi,%s
 %sum2:int = add %sum1,%i
 %sum3:int = add %sum2,%di
 %sum4:int = add %sum3,%contained
