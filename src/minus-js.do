@@ -101,20 +101,95 @@ export function renderDoofJs(module_: MinusModule, debugHeap: bool = false): str
     result = result + "const enumsByTag = new Map(" + enumMetadata + ".map(type => [type.tag, type]));\n"
     result = result + "const exportedFunctions = " + functionList + ";\n"
     result = result + "const importedFunctions = " + importsList + ";\n"
+    result = result + `function createDoofStringBridge(wasm) {
+  const memory = wasm.__doof_ffi_memory, alloc = wasm.__doof_ffi_alloc;
+  const stringType = classesByName.get('__doof_string'), arrayType = classesByName.get('__doof_array_char');
+  function view() { return new DataView(memory.buffer); }
+  function chunkAddress(data, chunkIndex) {
+    const v = view();
+    let node = v.getUint32(data + 12, true);
+    node = v.getUint32(node + 8 + (chunkIndex >>> 16) * 4, true);
+    node = v.getUint32(node + 8 + ((chunkIndex >>> 8) & 255) * 4, true);
+    return v.getUint32(node + 8 + (chunkIndex & 255) * 4, true) + 8;
+  }
+  function makeString(text) {
+    if (typeof text !== 'string') throw new TypeError('expected a string');
+    if (!stringType || !arrayType) throw new Error('this module has no string layout');
+    if (text.length > 2147483647) throw new RangeError('string length exceeds the Doof array range');
+    for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) > 255) throw new RangeError('Doof strings support characters from 0 to 255');
+    let data;
+    if (text.length <= 1024) {
+      const size = Math.max(24, 24 + Math.ceil(Math.max(0, text.length - 16) / 16) * 16);
+      data = alloc(size, 30) >>> 0;
+      view().setUint32(data + 4, text.length, true);
+      const bytes = new Uint8Array(memory.buffer, data + 8, text.length);
+      for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
+    } else {
+      data = alloc(24, 29) >>> 0;
+      view().setUint32(data + 4, text.length, true);
+      view().setUint32(data + 8, Math.ceil(text.length / 1024), true);
+      view().setUint32(data + 16, 0, true);
+      function ownedBlock(tag) {
+        const block = alloc(1032, tag) >>> 0;
+        new Uint8Array(memory.buffer, block + 8, 1024).fill(0);
+        const v = view();
+        v.setUint32(block + 4, v.getUint32(data + 16, true), true);
+        v.setUint32(data + 16, block, true);
+        return block;
+      }
+      const root = ownedBlock(28);
+      view().setUint32(data + 12, root, true);
+      for (let offset = 0; offset < text.length; offset += 1024) {
+        const index = offset / 1024;
+        let node = root;
+        for (const slot of [index >>> 16, (index >>> 8) & 255]) {
+          const address = node + 8 + slot * 4;
+          let child = view().getUint32(address, true);
+          if (!child) { child = ownedBlock(28); view().setUint32(address, child, true); }
+          node = child;
+        }
+        const chunk = ownedBlock(27);
+        view().setUint32(node + 8 + (index & 255) * 4, chunk, true);
+        const length = Math.min(1024, text.length - offset);
+        const bytes = new Uint8Array(memory.buffer, chunk + 8, length);
+        for (let i = 0; i < length; i++) bytes[i] = text.charCodeAt(offset + i);
+      }
+    }
+    const array = alloc(arrayType.size, arrayType.tag) >>> 0;
+    view().setUint32(array + 4, 1, true);
+    view().setUint32(array + arrayType.fields.find(field => field.name === 'data').offset, data, true);
+    const string = alloc(stringType.size, stringType.tag) >>> 0;
+    view().setUint32(string + 4, 1, true);
+    view().setUint32(string + stringType.fields.find(field => field.name === 'chars').offset, array, true);
+    return string;
+  }
+  function readString(address) {
+    const v = view();
+    const chars = v.getUint32(address + stringType.fields.find(field => field.name === 'chars').offset, true);
+    const data = v.getUint32(chars + arrayType.fields.find(field => field.name === 'data').offset, true);
+    const length = v.getUint32(data + 4, true), small = v.getUint16(data, true) === 30;
+    const parts = [];
+    for (let offset = 0; offset < length; offset += 1024) {
+      const start = small ? data + 8 + offset : chunkAddress(data, offset / 1024);
+      parts.push(String.fromCharCode(...new Uint8Array(memory.buffer, start, Math.min(1024, length - offset))));
+    }
+    return parts.join('');
+  }
+  return {makeString, readString};
+}
+`
     result = result + "function createDoofModule(instance) {\n"
     result = result + "  const wasm = instance.exports || instance;\n"
     result = result + "  const memory = wasm.__doof_ffi_memory, alloc = wasm.__doof_ffi_alloc, release = wasm.__doof_ffi_release;\n"
     result = result + "  if (!memory || !alloc || !release) throw new Error('Doof FFI exports are missing');\n"
-    result = result + "  const stringType = classesByName.get('__doof_string'), charArrayType = classesByName.get('__doof_array_char');\n"
-    result = result + "  function makeString(text) { if (typeof text !== 'string') throw new TypeError('expected a string'); const chars = []; for (const char of text) { const code = char.codePointAt(0); if (code > 255) throw new RangeError('Doof strings support characters from 0 to 255'); chars.push(code); } if (chars.length > 1024) throw new RangeError('Doof strings are limited to 1024 characters'); if (!stringType || !charArrayType) throw new Error('this module has no string layout'); const dataSize = Math.max(24, 24 + Math.ceil(Math.max(0, chars.length - 16) / 16) * 16); const data = alloc(dataSize, 30) >>> 0; let view = new DataView(memory.buffer); view.setUint32(data + 4, chars.length, true); for (let i = 0; i < chars.length; i++) view.setUint8(data + 8 + i, chars[i]); const array = alloc(charArrayType.size, charArrayType.tag) >>> 0; view = new DataView(memory.buffer); view.setUint32(array + 4, 1, true); const dataField = charArrayType.fields.find(field => field.name === 'data'); view.setUint32(array + dataField.offset, data, true); const string = alloc(stringType.size, stringType.tag) >>> 0; view = new DataView(memory.buffer); view.setUint32(string + 4, 1, true); const charsField = stringType.fields.find(field => field.name === 'chars'); view.setUint32(string + charsField.offset, array, true); return string; }\n"
-    result = result + "  function readString(address) { const view = new DataView(memory.buffer); const charsField = stringType.fields.find(field => field.name === 'chars'); const array = view.getUint32(address + charsField.offset, true); const arrayView = new DataView(memory.buffer); const dataField = charArrayType.fields.find(field => field.name === 'data'); const data = arrayView.getUint32(array + dataField.offset, true); const length = arrayView.getUint32(data + 4, true); const bytes = new Uint8Array(memory.buffer, data + 8, length); let text = ''; for (let i = 0; i < bytes.length; i += 8192) text += String.fromCharCode(...bytes.subarray(i, i + 8192)); return text; }\n"
+    result = result + "  const {makeString, readString} = createDoofStringBridge(wasm);\n"
     result = result + "  const api = Object.create(null); for (const fn of exportedFunctions) { const raw = wasm[fn.name]; if (typeof raw !== 'function') throw new Error('missing Wasm export: ' + fn.name); api[fn.name] = (...args) => { if (args.length !== fn.params.length) throw new TypeError(fn.name + ' expects ' + fn.params.length + ' arguments'); const owned = []; let resultPointer = 0; try { const marshaled = args.map((value, index) => { if (fn.params[index] === '__doof_string') { const pointer = makeString(value); owned.push(pointer); return pointer; } if (fn.params[index] === 'bool') return value ? 1 : 0; return value; }); const value = raw(...marshaled); if (fn.result === '__doof_string') { resultPointer = value >>> 0; return readString(resultPointer); } if (fn.result === 'bool') return value !== 0; return value; } finally { if (fn.result === '__doof_string' && resultPointer) release(resultPointer); for (const pointer of owned) release(pointer); } }; } return api;\n}\n"
     result = result + "export { createDoofModule };\n"
     result = result + "function createDoofImports(host = {}) {\n"
     result = result + "  let wasm = null; const imports = Object.create(null);\n"
     result = result + "  function runtime() { if (!wasm) throw new Error('attach the Doof instance before calling host imports'); return wasm; }\n"
-    result = result + "  function readString(address) { const w = runtime(), memory = w.__doof_ffi_memory; const stringType = classesByName.get('__doof_string'), arrayType = classesByName.get('__doof_array_char'); const view = new DataView(memory.buffer); const chars = view.getUint32(address + stringType.fields.find(field => field.name === 'chars').offset, true); const data = view.getUint32(chars + arrayType.fields.find(field => field.name === 'data').offset, true); const length = view.getUint32(data + 4, true); const bytes = new Uint8Array(memory.buffer, data + 8, length); let text = ''; for (let i = 0; i < bytes.length; i += 8192) text += String.fromCharCode(...bytes.subarray(i, i + 8192)); return text; }\n"
-    result = result + "  function makeString(text) { if (typeof text !== 'string') throw new TypeError('host import must return a string'); const chars = []; for (const char of text) { const code = char.codePointAt(0); if (code > 255) throw new RangeError('Doof strings support characters from 0 to 255'); chars.push(code); } if (chars.length > 1024) throw new RangeError('Doof strings are limited to 1024 characters'); const w = runtime(), memory = w.__doof_ffi_memory, alloc = w.__doof_ffi_alloc; const stringType = classesByName.get('__doof_string'), arrayType = classesByName.get('__doof_array_char'); const size = Math.max(24, 24 + Math.ceil(Math.max(0, chars.length - 16) / 16) * 16); const data = alloc(size, 30) >>> 0; let view = new DataView(memory.buffer); view.setUint32(data + 4, chars.length, true); for (let i = 0; i < chars.length; i++) view.setUint8(data + 8 + i, chars[i]); const array = alloc(arrayType.size, arrayType.tag) >>> 0; view = new DataView(memory.buffer); view.setUint32(array + 4, 1, true); view.setUint32(array + arrayType.fields.find(field => field.name === 'data').offset, data, true); const string = alloc(stringType.size, stringType.tag) >>> 0; view = new DataView(memory.buffer); view.setUint32(string + 4, 1, true); view.setUint32(string + stringType.fields.find(field => field.name === 'chars').offset, array, true); return string; }\n"
+    result = result + "  function readString(address) { return createDoofStringBridge(runtime()).readString(address); }\n"
+    result = result + "  function makeString(text) { return createDoofStringBridge(runtime()).makeString(text); }\n"
     result = result + "  for (const fn of importedFunctions) { const callback = fn.module === 'doof' ? host[fn.importName] : host[fn.module]?.[fn.importName]; if (typeof callback !== 'function') throw new TypeError('missing host function ' + fn.module + '.' + fn.importName); if (!imports[fn.module]) imports[fn.module] = Object.create(null); imports[fn.module][fn.importName] = (...args) => { if (args.length !== fn.params.length) throw new TypeError(fn.importName + ' expects ' + fn.params.length + ' arguments'); const converted = args.map((value, index) => fn.params[index] === '__doof_string' ? readString(value >>> 0) : fn.params[index] === 'bool' ? value !== 0 : value); const value = callback(...converted); if (fn.result === '__doof_string') return makeString(value); if (fn.result === 'bool') return value ? 1 : 0; return value; }; }\n"
     result = result + "  return {imports, attach(instance) { wasm = instance.exports || instance; }};\n}\n"
     result = result + "export { createDoofImports };\n"

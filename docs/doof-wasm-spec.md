@@ -1,6 +1,6 @@
 # doof-wasm source subset
 
-doof-wasm accepts a checked, single-file Doof program and lowers it to
+doof-wasm accepts a checked Doof module graph and lowers it to
 doof--. This is an initial embedded-language subset, not a replacement for
 the full Doof compiler.
 
@@ -38,18 +38,31 @@ the full Doof compiler.
 - Basic `string` values backed by an injected string class and a wrapped,
   read-only `char[]`; string literals, `.length`, and indexed character reads
   are supported. Content-based comparison operators, `.compare(other)`, and
-  `.indexOf(search)` are supported. Interpolation and other string methods
-  are not supported.
+  `.indexOf(search)`, `.contains(search)`, `.startsWith(prefix)`,
+  `.endsWith(suffix)`, `.substring(start[, end])`, and `.split(separator)` are
+  supported. Concatenation and `+=` allocate a new string without mutating either
+  operand. Split retains empty fields for a nonempty separator and splits into
+  individual characters for an empty separator. `string(value)` supports
+  `int`, `long`, `byte`, `bool`, `char`, and string values, including the minimum
+  signed integer values. Floating-point and enum formatting, interpolation, and
+  other string methods remain unsupported.
 - Host functions can be declared with `import function name(args): result`.
   They become Wasm imports in the default `doof` namespace and are connected
   through `createDoofImports(host)` from the generated JavaScript companion.
   String arguments/results are bridged to JavaScript strings. An optional
   `from "module"` selects a Wasm import namespace.
+- Relative imports and multiple source files, flattened with module-qualified
+  names. Type-alias declarations use the checker-resolved target type. Scalar
+  top-level immutable/readonly constants with literal, constant reference, unary,
+  and binary initializers are expanded at their use sites; arbitrary module
+  initializers remain unsupported.
 - Local `let`, `readonly`, and inferred immutable bindings; returns; `if`,
   `if`/`else`, and `else if` branches that rejoin; union `case` statements with
   type captures, `none`, and wildcard arms; `while` loops; C-style `for` loops;
   and `for-of` loops over supported arrays and integer ranges. Array iterables
-  and range endpoints are evaluated once per loop entry.
+  and range endpoints are evaluated once per loop entry. Unlabeled `break` and
+  `continue` target the innermost loop and carry local values through the exit
+  or update edge; `continue` executes C-style updates and for-of increments.
 - Value `if` expressions, `??` for nullable and `Result` values, and `?.`
   member or method access that propagates `none` from a nullable receiver.
 - Function values lower to generated `__closure_<result>_<arg>...` interfaces
@@ -57,27 +70,37 @@ the full Doof compiler.
   them into immutable fields. Mutable `let` captures share a generated cell
   with the outer binding, so updates are visible both inside and outside the
   closure. Calls dispatch through the generated `invoke` method.
-- Arithmetic `+`, `-`, `*`, `/`; comparisons `==`, `!=`, `<`, `>`; unary `-`
+- Arithmetic `+`, `-`, `*`, `/`, integer division `\`, and integer remainder
+  `%`; compound arithmetic assignments on locals, fields, and array elements;
+  short-circuit `&&` and `||`; comparisons `==`, `!=`, `<`, `>`, `<=`, `>=`; unary `-`
   and `!`; direct, instance, named, and closure calls; field reads and writes;
   positional and named class construction; class-to-interface assignment;
   numeric conversion; and `any`
   boxing/casts. Union members are boxed into `any`; comparisons with `none`
-  test the contained tag. `try!` unwraps a Result and traps on failure;
+  test the contained tag. Plain statement-level `try` unwraps a Result and
+  returns the original Failure arm on failure. `Success(...)` and `Failure(...)`
+  calls and brace constructors are supported. Discarded bindings evaluate their
+  value. Forced access on strong nullable receivers casts and traps on `none`.
+  `try!` unwraps a Result and traps on failure;
   `try?` unwraps the success value and produces `none` on failure. A nullable
   value can be unwrapped with the `else` binding form. The `panic(message)`
   intrinsic is supported as a terminating trap; the Wasm backend discards its
   message.
 
 Local bindings are converted to doof-- SSA values. Values that cross branches
-or loop edges are passed as block arguments.
+or loop edges are passed as block arguments. A liveness pass also carries
+expression temporaries when evaluating a later operand creates branches,
+including receivers and arguments evaluated before a conditional value.
 
 ## Not supported yet
 
-Imports and multiple source files, generics, string-backed enums, arrays whose
-element type is unsupported by doof--, labeled loops, `break`, `continue`, loop-else
+Generics, string-backed enums, arrays whose
+element type is unsupported by doof--, labeled loops and exits, loop-else
 clauses, for-of destructuring, map/set/stream iteration, static members, weak references, case expressions,
 value/range patterns, and multiple patterns per case arm,
-async code, compound assignments, nested lexical blocks, and other source expressions. The doof-- backend
+async code, nested lexical blocks, arbitrary module initializers, discarded
+fallible declaration-else bindings, try destructuring/else handlers, and other
+source expressions. The doof-- backend
 already supports more control flow and runtime operations; the source lowering
 will grow to cover those as the subset is developed.
 

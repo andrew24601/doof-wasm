@@ -1,4 +1,5 @@
 // Runtime classes synthesized by source lowering for strings, arrays, and results.
+import { injectStringConstruction } from "./doof-lowering-strings"
 import {
   BYTE_ARRAY_CLASS, BYTE_ARRAY_DESTRUCTOR, CHAR_ARRAY_CLASS, CHAR_ARRAY_DESTRUCTOR,
   STRING_CLASS, RESULT_SUCCESS_CLASS, RESULT_FAILURE_CLASS, ARRAY_CLASS_PREFIX,
@@ -244,6 +245,7 @@ function arraysNeedStringComparison(module_: MinusModule): bool {
 }
 
 export function injectStringImplementation(module_: MinusModule): none {
+  injectStringConstruction(module_)
   module_.classes.push(MinusClass {
     name: STRING_CLASS,
     fields: [MinusField { name: "chars", typeName: CHAR_ARRAY_CLASS }],
@@ -352,8 +354,8 @@ export function injectStringImplementation(module_: MinusModule): none {
         MinusInstruction { op: "jump", args: ["inner", "%start4", "%nextOffset"] },
       ] },
       MinusBlock { name: "nextStart", params: [MinusValue { name: "%failedStart", typeName: "int" }], instructions: [
-        MinusInstruction { op: "const", result: MinusValue { name: "%one", typeName: "int" }, args: ["1"] },
-        MinusInstruction { op: "add", result: MinusValue { name: "%after", typeName: "int" }, args: ["%failedStart", "%one"] },
+        MinusInstruction { op: "const", result: MinusValue { name: "%startOne", typeName: "int" }, args: ["1"] },
+        MinusInstruction { op: "add", result: MinusValue { name: "%after", typeName: "int" }, args: ["%failedStart", "%startOne"] },
         MinusInstruction { op: "jump", args: ["outer", "%after"] },
       ] },
       MinusBlock { name: "found", params: [MinusValue { name: "%position", typeName: "int" }], instructions: [MinusInstruction { op: "return", args: ["%position"] }] },
@@ -424,22 +426,22 @@ export function injectStringImplementation(module_: MinusModule): none {
         MinusInstruction { op: "sub", result: MinusValue { name: "%sliceLength", typeName: "int" }, args: ["%end", "%start"] },
         MinusInstruction { op: "array-alloc", result: MinusValue { name: "%data", typeName: "int" }, args: ["%sliceLength", "char"] },
         MinusInstruction { op: "const", result: MinusValue { name: "%zero", typeName: "int" }, args: ["0"] },
-        MinusInstruction { op: "jump", args: ["loop", "%zero"] },
+        MinusInstruction { op: "jump", args: ["loop", "%zero", "%chars", "%data", "%sliceLength"] },
       ] },
-      MinusBlock { name: "loop", params: [MinusValue { name: "%index", typeName: "int" }], instructions: [
-        MinusInstruction { op: "lt", result: MinusValue { name: "%more", typeName: "bool" }, args: ["%index", "%sliceLength"] },
-        MinusInstruction { op: "branch", args: ["%more", "copy", "%index", "|", "finish"] },
+      MinusBlock { name: "loop", params: [MinusValue { name: "%index", typeName: "int" }, MinusValue { name: "%loopChars", typeName: CHAR_ARRAY_CLASS }, MinusValue { name: "%loopData", typeName: "int" }, MinusValue { name: "%loopLength", typeName: "int" }], instructions: [
+        MinusInstruction { op: "lt", result: MinusValue { name: "%more", typeName: "bool" }, args: ["%index", "%loopLength"] },
+        MinusInstruction { op: "branch", args: ["%more", "copy", "%index", "%loopChars", "%loopData", "%loopLength", "|", "finish", "%loopData"] },
       ] },
-      MinusBlock { name: "copy", params: [MinusValue { name: "%index2", typeName: "int" }], instructions: [
+      MinusBlock { name: "copy", params: [MinusValue { name: "%index2", typeName: "int" }, MinusValue { name: "%copyChars", typeName: CHAR_ARRAY_CLASS }, MinusValue { name: "%copyData", typeName: "int" }, MinusValue { name: "%copyLength", typeName: "int" }], instructions: [
         MinusInstruction { op: "add", result: MinusValue { name: "%sourceIndex", typeName: "int" }, args: ["%start", "%index2"] },
-        MinusInstruction { op: "call-method", result: MinusValue { name: "%character", typeName: "char" }, args: ["%chars", "get", "%sourceIndex"] },
-        MinusInstruction { op: "array-set", args: ["%data", "%index2", "%character"] },
+        MinusInstruction { op: "call-method", result: MinusValue { name: "%character", typeName: "char" }, args: ["%copyChars", "get", "%sourceIndex"] },
+        MinusInstruction { op: "array-set", args: ["%copyData", "%index2", "%character"] },
         MinusInstruction { op: "const", result: MinusValue { name: "%one", typeName: "int" }, args: ["1"] },
         MinusInstruction { op: "add", result: MinusValue { name: "%next", typeName: "int" }, args: ["%index2", "%one"] },
-        MinusInstruction { op: "jump", args: ["loop", "%next"] },
+        MinusInstruction { op: "jump", args: ["loop", "%next", "%copyChars", "%copyData", "%copyLength"] },
       ] },
-      MinusBlock { name: "finish", instructions: [
-        MinusInstruction { op: "new", result: MinusValue { name: "%resultChars", typeName: CHAR_ARRAY_CLASS }, args: [CHAR_ARRAY_CLASS, "%data"] },
+      MinusBlock { name: "finish", params: [MinusValue { name: "%finishData", typeName: "int" }], instructions: [
+        MinusInstruction { op: "new", result: MinusValue { name: "%resultChars", typeName: CHAR_ARRAY_CLASS }, args: [CHAR_ARRAY_CLASS, "%finishData"] },
         MinusInstruction { op: "new", result: MinusValue { name: "%result", typeName: STRING_CLASS }, args: [STRING_CLASS, "%resultChars"] },
         MinusInstruction { op: "return", args: ["%result"] },
       ] },

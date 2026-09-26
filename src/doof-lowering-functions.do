@@ -1,4 +1,5 @@
 // Lower checked function bodies, expressions, control flow, and lambdas.
+import { carryExpressionValues } from "./doof-lowering-values"
 import {
   PrimitiveType, ClassType, EnumType, ArrayResolvedType, SerialValueResolvedType, NoneType,
   UnionResolvedType, ResultResolvedType, SuccessResolvedType, FailureResolvedType, WeakResolvedType, ResolvedType, FunctionType,
@@ -7,9 +8,9 @@ import {
   Statement, FunctionDeclaration, EnumDeclaration, Expression, Block, ReturnStatement, ImmutableBinding, LetDeclaration,
   ReadonlyDeclaration, ExpressionStatement, IntLiteral, LongLiteral, FloatLiteral, DoubleLiteral, StringLiteral,
   CharLiteral, BoolLiteral, NoneLiteral, Identifier, BinaryExpression, UnaryExpression, AssignmentExpression,
-  CallExpression, MemberExpression, ConstructExpression, ArrayLiteral, IndexExpression, AsExpression, ThisExpression,
+  ObjectProperty, CallExpression, MemberExpression, ConstructExpression, ArrayLiteral, IndexExpression, AsExpression, ThisExpression,
   DotShorthand, IfStatement, IfBranch, IfExpression, CaseStatement, TypePattern, ValuePattern, WildcardPattern, WhileStatement,
-  ForStatement, ForOfStatement, LambdaExpression,
+  ForStatement, ForOfStatement, LambdaExpression, BreakStatement, ContinueStatement, TryStatement, ConstDeclaration,
 } from "doof/src/ast"
 import { collectNestedExpressions, collectBlockExpressions } from "doof/src/ast-walk"
 import {
@@ -17,7 +18,7 @@ import {
 } from "./minus-ir"
 import { BYTE_ARRAY_CLASS, CHAR_ARRAY_CLASS, STRING_CLASS, RESULT_SUCCESS_CLASS, RESULT_FAILURE_CLASS, arrayElementFromClassName, isArrayClass } from "./doof-lowering-constants"
 import {
-  SourceBinding, FunctionLowering, qualifiedName, atLine, enumVariantValue, resolvedName, closureInterfaceName,
+  SourceBinding, SourceConstant, LoopTarget, FunctionLowering, qualifiedName, atLine, enumVariantValue, resolvedName, closureInterfaceName,
   annotationName, typeFromValue, declarationType, findBinding, latestLocals, bindingValues, result, effect,
   blockContext, concatValues, appendContext, nestedElseIf, functionResultType, registerClosureType,
 } from "./doof-lowering-support"
@@ -98,6 +99,7 @@ function lowerWhile(context: FunctionLowering, statement: WhileStatement): none 
   effect(conditionContext, "branch", branchArgs)
 
   bodyContext := blockContext(conditionContext, locals, id, "w", bodyName)
+  bodyContext.loopTarget = LoopTarget { breakName: exitName, continueName: conditionName, locals }
   lowerStatements(bodyContext, statement.body.statements)
   if bodyContext.failed != "" { context.failed = bodyContext.failed; return }
   if !bodyContext.terminated { effect(bodyContext, "jump", concatValues([conditionName], bindingValues(bodyContext, locals))) }
@@ -111,8 +113,7 @@ function lowerWhile(context: FunctionLowering, statement: WhileStatement): none 
   context.terminated = exitContext.terminated
 }
 
-// Source loops use explicit header, body, and exit blocks; future break/continue
-// edges can target those blocks while preserving the same carried local values.
+// Source loops carry locals through the header, body, update, and exit blocks.
 function lowerFor(context: FunctionLowering, statement: ForStatement): none {
   if statement.label != none { context.failed = "labeled loops are not supported by doof-wasm yet"; return }
   if statement.then_ != none { context.failed = "for-else clauses are not supported by doof-wasm yet"; return }
@@ -136,17 +137,21 @@ function lowerFor(context: FunctionLowering, statement: ForStatement): none {
   effect(conditionContext, "branch", branchArgs)
 
   bodyContext := blockContext(conditionContext, locals, id, "f", bodyName)
+  updateName := "for_update" + string(id)
+  bodyContext.loopTarget = LoopTarget { breakName: exitName, continueName: updateName, locals }
   lowerStatements(bodyContext, statement.body.statements)
   if bodyContext.failed != "" { context.failed = bodyContext.failed; return }
-  if !bodyContext.terminated {
-    for update of statement.update { _ := lowerExpression(bodyContext, update); if bodyContext.failed != "" { context.failed = bodyContext.failed; return } }
-    effect(bodyContext, "jump", concatValues([conditionName], bindingValues(bodyContext, locals)))
-  }
+  if !bodyContext.terminated { effect(bodyContext, "jump", concatValues([updateName], bindingValues(bodyContext, locals))) }
+  updateContext := blockContext(bodyContext, locals, id, "u", updateName)
+  updateContext.loopTarget = context.loopTarget
+  for update of statement.update { _ := lowerExpression(updateContext, update); if updateContext.failed != "" { context.failed = updateContext.failed; return } }
+  effect(updateContext, "jump", concatValues([conditionName], bindingValues(updateContext, locals)))
   exitContext := blockContext(conditionContext, locals, id, "x", exitName)
-  exitContext.nextValue = bodyContext.nextValue
-  exitContext.nextBlock = bodyContext.nextBlock
+  exitContext.nextValue = updateContext.nextValue
+  exitContext.nextBlock = updateContext.nextBlock
   appendContext(context, conditionContext)
   appendContext(context, bodyContext)
+  appendContext(context, updateContext)
   appendContext(context, exitContext)
   for binding of latestLocals(exitContext) { context.bindings.push(binding) }
   context.terminated = exitContext.terminated
@@ -241,20 +246,24 @@ function lowerForOf(context: FunctionLowering, statement: ForOfStatement): none 
   if statement.bindings.length == 1 && statement.bindings[0] != "_" {
     bodyContext.bindings.push(SourceBinding { name: statement.bindings[0], typeName: elementType, valueName: item })
   }
+  updateName := "for_of_update" + string(id)
+  bodyContext.loopTarget = LoopTarget { breakName: exitName, continueName: updateName, locals: carried }
   lowerStatements(bodyContext, statement.body.statements)
   if bodyContext.failed != "" { context.failed = bodyContext.failed; return }
-  if !bodyContext.terminated {
-    currentCursor := findBinding(bodyContext, cursorName)!
-    one := result(bodyContext, "const", ["1"], "int")
-    nextCursor := result(bodyContext, "add", [currentCursor.valueName, one], "int")
-    bodyContext.bindings.push(SourceBinding { name: cursorName, typeName: "int", valueName: nextCursor, mutable: true })
-    effect(bodyContext, "jump", concatValues([conditionName], bindingValues(bodyContext, carried)))
-  }
+  if !bodyContext.terminated { effect(bodyContext, "jump", concatValues([updateName], bindingValues(bodyContext, carried))) }
+  updateContext := blockContext(bodyContext, carried, id, "u", updateName)
+  updateContext.loopTarget = context.loopTarget
+  currentCursor := findBinding(updateContext, cursorName)!
+  one := result(updateContext, "const", ["1"], "int")
+  nextCursor := result(updateContext, "add", [currentCursor.valueName, one], "int")
+  updateContext.bindings.push(SourceBinding { name: cursorName, typeName: "int", valueName: nextCursor, mutable: true })
+  effect(updateContext, "jump", concatValues([conditionName], bindingValues(updateContext, carried)))
   exitContext := blockContext(conditionContext, carried, id, "x", exitName)
-  exitContext.nextValue = bodyContext.nextValue
-  exitContext.nextBlock = bodyContext.nextBlock
+  exitContext.nextValue = updateContext.nextValue
+  exitContext.nextBlock = updateContext.nextBlock
   appendContext(context, conditionContext)
   appendContext(context, bodyContext)
+  appendContext(context, updateContext)
   appendContext(context, exitContext)
   while context.bindings.length > originalBindings.length { ignored := try! context.bindings.pop() }
   for binding of latestLocals(exitContext) { if binding.name != iterableName && binding.name != cursorName { context.bindings.push(binding) } }
@@ -545,6 +554,7 @@ function lowerLambda(context: FunctionLowering, expression: LambdaExpression): s
     closurePrefix: context.closurePrefix,
     currentBlock: MinusBlock { name: "entry", line: context.currentLine, sourcePath: context.sourcePath },
   }
+  for constant of context.constants { invoke.constants.push(constant) }
   for interfaceName of context.interfaceNames { invoke.interfaceNames.push(interfaceName) }
   for declaration of context.enumDeclarations { invoke.enumDeclarations.push(declaration) }
   for enumModule of context.enumModules { invoke.enumModules.push(enumModule) }
@@ -575,10 +585,12 @@ function lowerLambda(context: FunctionLowering, expression: LambdaExpression): s
   if invoke.failed != "" { context.failed = "in closure: " + invoke.failed; return "" }
   if invoke.closureIndex > context.closureIndex { context.closureIndex = invoke.closureIndex }
   if resultType == "none" && !invoke.terminated { effect(invoke, "return", []) }
-  context.module_!.functions.push(MinusFunction {
+  function_ := MinusFunction {
     name: className + ".invoke", params, result: resultType, blocks: invoke.blocks,
     line: context.currentLine, sourcePath: context.sourcePath,
-  })
+  }
+  carryExpressionValues(function_)
+  context.module_!.functions.push(function_)
   created := result(context, "new", args, className)
   return result(context, "as", [created], signature)
 }
@@ -593,7 +605,6 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
     value: DoubleLiteral -> { return result(context, "const", [value.raw], "double") }
     value: StringLiteral -> {
       if value.interpolations.length > 0 { context.failed = "string interpolation is not supported by doof-wasm"; return "" }
-      if value.value.length > 1024 { context.failed = "string literals are limited to 1024 characters"; return "" }
       for index of 0..<value.value.length {
         if int(value.value[index]) > 255 { context.failed = "string literal characters must fit in one UTF-8 byte"; return "" }
       }
@@ -608,8 +619,25 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       return lowerConditionalValue(context, condition, value.then_, value.else_, typeFromValue(expression), "if_value")
     }
     value: Identifier -> {
-      binding := findBinding(context, value.name)
-      if binding == none { context.failed = "unsupported global value " + value.name; return "" }
+      binding := if value.resolvedBinding != none && value.resolvedBinding!.symbol != none then none else findBinding(context, value.name)
+      if binding == none {
+        if value.resolvedBinding != none {
+          symbol := value.resolvedBinding!.symbol
+          modulePath := if symbol == none then value.resolvedBinding!.module else symbol!.module
+          name := if symbol == none then value.name else symbol!.name
+          for constant of context.constants {
+            if constant.modulePath != modulePath || constant.name != name { continue }
+            key := qualifiedName(modulePath, name)
+            if context.expandingConstants.contains(key) { context.failed = "cyclic constant initializer " + name; return "" }
+            if !constantExpression(constant.value) { context.failed = "top-level constant " + name + " requires a scalar constant initializer"; return "" }
+            context.expandingConstants.push(key)
+            emitted := lowerExpected(context, constant.value, typeFromValue(expression))
+            _ := try! context.expandingConstants.pop()
+            return emitted
+          }
+        }
+        context.failed = "unsupported global value " + value.name; return ""
+      }
       if binding!.boxedTypeName != "" { return result(context, "get", [binding!.valueName, "value"], binding!.typeName) }
       return binding!.valueName
     }
@@ -620,7 +648,12 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
     }
     value: BinaryExpression -> {
       if value.operator == "??" { return lowerCoalesce(context, value, expression) }
-      if !["+", "-", "*", "/", "==", "<", "!=", ">", "<=", ">="].contains(value.operator) {
+      if value.operator == "&&" || value.operator == "||" {
+        condition := lowerExpression(context, value.left)
+        literal := BoolLiteral { kind: "bool-literal", value: value.operator == "||", resolvedType: expression.resolvedType, span: expression.span }
+        return if value.operator == "&&" then lowerConditionalValue(context, condition, value.right, literal, "bool", "and") else lowerConditionalValue(context, condition, literal, value.right, "bool", "or")
+      }
+      if !["+", "-", "*", "/", "\\", "%", "==", "<", "!=", ">", "<=", ">="].contains(value.operator) {
         context.failed = "operator " + value.operator + " is not supported by doof-wasm"; return ""
       }
       if value.operator == "==" || value.operator == "!=" {
@@ -652,11 +685,18 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       let left = lowerExpression(context, value.left)
       let right = lowerExpression(context, value.right)
       if context.failed != "" { return "" }
+      if ["+", "-", "*", "/", "\\", "%"].contains(value.operator) && ["int", "long", "float", "double"].contains(typeFromValue(expression)) {
+        targetType := typeFromValue(expression)
+        if typeFromValue(value.left) != targetType { left = result(context, "convert", [left], targetType) }
+        if typeFromValue(value.right) != targetType { right = result(context, "convert", [right], targetType) }
+      }
       let op = value.operator
       if op == "+" { op = "add" }
       if op == "-" { op = "sub" }
       if op == "*" { op = "mul" }
-      if op == "/" { op = "div" }
+      if op == "/" || op == "\\" { op = "div" }
+      if op == "%" { op = "rem" }
+      if op == "add" && typeFromValue(value.left) == STRING_CLASS { return result(context, "call-method", [left, "concat", right], STRING_CLASS) }
       if op == "==" || op == "!=" { op = "eq" }
       if op == "<" { op = "lt" }
       if op == ">" && typeFromValue(value.left) != STRING_CLASS { op = "lt"; let swap = left; left = right; right = swap }
@@ -693,26 +733,29 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       return compared
     }
     value: AssignmentExpression -> {
-      if value.operator != "=" { context.failed = "compound assignment is not supported by doof-wasm"; return "" }
       case value.target {
         target: Identifier -> {
           binding := findBinding(context, target.name)
           if binding == none || target.resolvedBinding == none || !target.resolvedBinding!.mutable {
             context.failed = "assignment target must be a mutable local"; return ""
           }
-          assigned := lowerExpected(context, value.value, binding!.typeName)
+          old := if binding!.boxedTypeName == "" then binding!.valueName else result(context, "get", [binding!.valueName, "value"], binding!.typeName)
+          assigned := lowerAssigned(context, value, old, binding!.typeName)
+          stored := coerceValue(context, assigned, typeFromValue(expression), binding!.typeName)
           if binding!.boxedTypeName != "" {
-            effect(context, "set", [binding!.valueName, "value", assigned])
+            effect(context, "set", [binding!.valueName, "value", stored])
             return assigned
           }
-          context.bindings.push(SourceBinding { name: target.name, typeName: binding!.typeName, valueName: assigned, mutable: binding!.mutable })
+          context.bindings.push(SourceBinding { name: target.name, typeName: binding!.typeName, valueName: stored, mutable: binding!.mutable })
           return assigned
         }
         target: MemberExpression -> {
-          owner := lowerExpression(context, target.object)
+          owner := lowerReceiver(context, target)
           expected := if target.resolvedMember == none || target.resolvedMember!.type_ == none then "" else resolvedName(target.resolvedMember!.type_!)
-          assigned := if expected == "" then lowerExpression(context, value.value) else lowerExpected(context, value.value, expected)
-          effect(context, "set", [owner, target.property, assigned])
+          old := if value.operator == "=" then "" else result(context, "get", [owner, target.property], expected)
+          assigned := lowerAssigned(context, value, old, expected)
+          stored := coerceValue(context, assigned, typeFromValue(expression), expected)
+          effect(context, "set", [owner, target.property, stored])
           return assigned
         }
         target: IndexExpression -> {
@@ -720,8 +763,9 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
           array := lowerExpression(context, target.object)
           index := lowerExpression(context, target.index)
           elementType := typeFromValue(target)
-          assigned := lowerExpression(context, value.value)
-          stored := coerceValue(context, assigned, typeFromValue(value.value), elementType)
+          old := if value.operator == "=" then "" else result(context, "call-method", [array, "get", index], elementType)
+          assigned := lowerAssigned(context, value, old, elementType)
+          stored := coerceValue(context, assigned, typeFromValue(expression), elementType)
           _ := result(context, "call-method", [array, "set", index, stored], elementType)
           // Assignment expressions keep the checked right-hand-side type.
           return assigned
@@ -730,7 +774,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       }
     }
     value: UnaryExpression -> {
-      if value.operator == "try!" || value.operator == "try?" {
+      if value.operator == "try!" || value.operator == "try?" || value.operator == "try" {
         return lowerTryOperator(context, value, expression)
       }
       operand := lowerExpression(context, value.operand)
@@ -738,6 +782,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
         zero := result(context, "const", ["0"], typeFromValue(value.operand))
         return result(context, "sub", [zero, operand], typeFromValue(expression))
       }
+      if value.operator == "!" && !value.prefix { return if typeFromValue(value.operand) == "any" then result(context, "cast", [operand, typeFromValue(expression)], typeFromValue(expression)) else operand }
       if value.operator == "!" {
         no := result(context, "const", ["false"], "bool")
         return result(context, "eq", [operand, no], "bool")
@@ -749,7 +794,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       if value.optional && hasNoneType(value.object.resolvedType) {
         return lowerOptionalMember(context, value, expression)
       }
-      if value.force || (value.optional && hasWeakType(value.object.resolvedType)) { context.failed = "weak-reference member access is not supported by doof-wasm"; return "" }
+      if hasWeakType(value.object.resolvedType) && (value.force || value.optional) { context.failed = "weak-reference member access is not supported by doof-wasm"; return "" }
       if value.property == "value" && isEnumType(value.object.resolvedType) {
         enumValue := lowerExpression(context, value.object)
         return result(context, "convert", [enumValue], typeFromValue(expression))
@@ -776,6 +821,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
           _ -> { }
         }
       }
+      if value.force { return lowerMemberOnOwner(context, value, lowerReceiver(context, value)) }
       if value.property == "length" && isArrayClass(typeFromValue(value.object)) {
         array := lowerExpression(context, value.object)
         return result(context, "call-method", [array, "length"], "int")
@@ -817,8 +863,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
             context.failed = value.type_ + " construction payload must be named " + propertyName
             return ""
           }
-          if argument.value == none { context.failed = value.type_ + " construction payload is missing"; return "" }
-          argumentValue := argument.value!
+          argumentValue := propertyExpression(argument)
           payload = lowerExpression(context, argumentValue)
           if context.failed != "" { return "" }
           if typeFromValue(argumentValue) != "any" { payload = result(context, "box", [payload], "any") }
@@ -836,8 +881,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
         let found = false
         for property of value.args {
           if property.name == field.names[0] {
-            if property.value == none { context.failed = "missing construction field value"; return "" }
-            args.push(lowerExpected(context, property.value!, annotationName(field.resolvedType)))
+            args.push(lowerExpected(context, propertyExpression(property), annotationName(field.resolvedType)))
             found = true
           }
         }
@@ -1163,6 +1207,9 @@ function lowerTryOperator(context: FunctionLowering, operation: UnaryExpression,
   if operation.operator == "try!" {
     effect(failureContext, "panic", [])
     failureContext.terminated = true
+  } else if operation.operator == "try" {
+    effect(failureContext, "return", [failureSubject])
+    failureContext.terminated = true
   } else {
     let failureValue: string = result(failureContext, "const", ["none"], "none")
     targetType := typeFromValue(expression)
@@ -1175,7 +1222,8 @@ function lowerTryOperator(context: FunctionLowering, operation: UnaryExpression,
   successContext.currentBlock.params.push(MinusValue { name: successSubject, typeName: "any" })
   successContext.nextValue = failureContext.nextValue
   successContext.nextBlock = failureContext.nextBlock
-  let payload = result(successContext, "get", [successSubject, "value"], "any")
+  successArm := result(successContext, "cast", [successSubject, RESULT_SUCCESS_CLASS], RESULT_SUCCESS_CLASS)
+  let payload = result(successContext, "get", [successArm, "value"], "any")
   let successType = ""
   case operandType! { resultType: ResultResolvedType -> { successType = resolvedName(resultType.valueType) } _ -> { } }
   if successType != "" && successType != "any" { payload = result(successContext, "cast", [payload, successType], successType) }
@@ -1213,6 +1261,30 @@ function isEnumType(type_: ResolvedType | none): bool {
 function lowerCall(context: FunctionLowering, call: CallExpression, expression: Expression): string {
   case call.callee {
     callee: Identifier -> {
+      if ["Success", "Failure"].contains(callee.name) && callee.resolvedBinding != none && callee.resolvedBinding!.kind == "builtin" {
+        payload := lowerExpected(context, call.args[0].value, "any")
+        className := if callee.name == "Success" then RESULT_SUCCESS_CLASS else RESULT_FAILURE_CLASS
+        instance := result(context, "new", [className, payload], className)
+        return if typeFromValue(expression) == "any" then result(context, "box", [instance], "any") else instance
+      }
+      if callee.name == "string" && callee.resolvedBinding != none && callee.resolvedBinding!.kind == "builtin" {
+        argument := call.args[0].value
+        input := lowerExpression(context, argument)
+        typeName := typeFromValue(argument)
+        if typeName == STRING_CLASS { return input }
+        if typeName == "bool" {
+          yes := StringLiteral { kind: "string-literal", value: "true", parts: [], interpolations: [], span: expression.span, resolvedType: expression.resolvedType }
+          no := StringLiteral { kind: "string-literal", value: "false", parts: [], interpolations: [], span: expression.span, resolvedType: expression.resolvedType }
+          return lowerConditionalValue(context, input, yes, no, STRING_CLASS, "format_bool")
+        }
+        if typeName == "char" { return result(context, "call", ["__doof_format_char", input], STRING_CLASS) }
+        if ["byte", "int", "long"].contains(typeName) {
+          wide := if typeName == "long" then input else result(context, "convert", [input], "long")
+          return result(context, "call", ["__doof_format_long", wide], STRING_CLASS)
+        }
+        context.failed = "string conversion is not supported by doof-wasm for " + typeName
+        return ""
+      }
       if callee.name == "panic" && call.resolvedFunction == none {
         if call.args.length != 1 { context.failed = "panic requires one message argument"; return "" }
         effect(context, "panic", [])
@@ -1287,7 +1359,7 @@ function lowerCall(context: FunctionLowering, call: CallExpression, expression: 
       _ -> { }
     }
   }
-  case call.callee { member: MemberExpression -> { receiver = lowerExpression(context, member.object) } _ -> { } }
+  case call.callee { member: MemberExpression -> { receiver = lowerReceiver(context, member) } _ -> { } }
   let args: string[] = []
   let hasNamed = false
   for argument of call.args { if argument.name != none { hasNamed = true } }
@@ -1575,7 +1647,7 @@ function lowerStatements(context: FunctionLowering, statements: Statement[]): no
           if context.failed != "" { return }
           continue
         }
-        if value.name == "_" { context.failed = "discarded bindings are not supported by doof-wasm"; return }
+        if value.name == "_" { _ := lowerExpression(context, value.value); continue }
         typeName := declarationType(value.resolvedType, typeFromValue(value.value))
         emitted := lowerExpected(context, value.value, typeName)
         if !context.terminated { context.bindings.push(SourceBinding { name: value.name, typeName, valueName: emitted }) }
@@ -1591,13 +1663,16 @@ function lowerStatements(context: FunctionLowering, statements: Statement[]): no
         if !context.terminated { context.bindings.push(SourceBinding { name: value.name, typeName, valueName: emitted, mutable: true }) }
       }
       value: ReturnStatement -> {
-        if value.value == none { effect(context, "return", []) }
+        if value.value == none { effect(context, "return", []); context.terminated = true }
         else {
           returned := lowerExpected(context, value.value!, annotationName(value.resolvedExpectedType))
           if !context.terminated { effect(context, "return", [returned]); context.terminated = true }
         }
       }
       value: ExpressionStatement -> { _ := lowerExpression(context, value.expression) }
+      value: TryStatement -> { lowerTryStatement(context, value) }
+      value: BreakStatement -> { lowerLoopExit(context, false, value.label) }
+      value: ContinueStatement -> { lowerLoopExit(context, true, value.label) }
       _: Block -> { context.failed = "nested lexical blocks are not supported by doof-wasm"; return }
       value: IfStatement -> { lowerIf(context, value) }
       value: CaseStatement -> { lowerCaseStatement(context, value) }
@@ -1609,10 +1684,11 @@ function lowerStatements(context: FunctionLowering, statements: Statement[]): no
   }
 }
 
-export function lowerFunction(fn: FunctionDeclaration, modulePath: string, module_: MinusModule, className: string = "", interfaceNames: string[] = [], enumDeclarations: EnumDeclaration[] = [], enumModules: string[] = []): Result<MinusFunction, string> {
+export function lowerFunction(fn: FunctionDeclaration, modulePath: string, module_: MinusModule, className: string = "", interfaceNames: string[] = [], enumDeclarations: EnumDeclaration[] = [], enumModules: string[] = [], constants: SourceConstant[] = []): Result<MinusFunction, string> {
   let params: MinusValue[] = []
   let functionName = qualifiedName(modulePath, fn.name)
   let context = FunctionLowering { sourcePath: modulePath, module_, closurePrefix: qualifiedName(modulePath, "_closure_" + string(fn.span.start.offset)), currentBlock: MinusBlock { name: "entry", line: fn.span.start.line, sourcePath: modulePath } }
+  for constant of constants { context.constants.push(constant) }
   for interfaceName of interfaceNames { context.interfaceNames.push(interfaceName) }
   for declaration of enumDeclarations { context.enumDeclarations.push(declaration) }
   for enumModule of enumModules { context.enumModules.push(enumModule) }
@@ -1641,5 +1717,85 @@ export function lowerFunction(fn: FunctionDeclaration, modulePath: string, modul
   if context.failed != "" { return Failure(atLine(context.currentLine, "in " + functionName + ": " + context.failed)) }
   if resultType == "none" && !context.terminated { effect(context, "return", []) }
   let function_ = MinusFunction { name: functionName, params, result: resultType, exported: fn.exported && className == "", blocks: context.blocks, line: fn.span.start.line, sourcePath: modulePath }
+  carryExpressionValues(function_)
   return Success(function_)
+}
+
+export function constantExpression(value: Expression): bool {
+  case value {
+    _: IntLiteral -> { return true }
+    _: LongLiteral -> { return true }
+    _: FloatLiteral -> { return true }
+    _: DoubleLiteral -> { return true }
+    literal: StringLiteral -> { return literal.interpolations.length == 0 }
+    _: CharLiteral -> { return true }
+    _: BoolLiteral -> { return true }
+    _: NoneLiteral -> { return true }
+    _: Identifier -> { return true }
+    binary: BinaryExpression -> { return constantExpression(binary.left) && constantExpression(binary.right) }
+    unary: UnaryExpression -> { return ["-", "!"].contains(unary.operator) && constantExpression(unary.operand) }
+    _ -> { return false }
+  }
+}
+
+function lowerAssigned(context: FunctionLowering, assignment: AssignmentExpression, old: string, typeName: string): string {
+  if assignment.operator == "=" { return lowerExpression(context, assignment.value) }
+  right := lowerExpected(context, assignment.value, typeName)
+  operator := assignment.operator.substring(0, assignment.operator.length - 1)
+  if operator == "+" && typeName == STRING_CLASS { return result(context, "call-method", [old, "concat", right], STRING_CLASS) }
+  let op = ""
+  if operator == "+" { op = "add" }
+  if operator == "-" { op = "sub" }
+  if operator == "*" { op = "mul" }
+  if operator == "/" || operator == "\\" { op = "div" }
+  if operator == "%" { op = "rem" }
+  if op == "" { context.failed = "unsupported compound assignment " + assignment.operator; return "" }
+  return result(context, op, [old, right], typeName)
+}
+
+function lowerLoopExit(context: FunctionLowering, continuing: bool, label: string | none): none {
+  if label != none { context.failed = "labeled loop exits are not supported by doof-wasm"; return }
+  if context.loopTarget == none { context.failed = "loop exit outside a loop"; return }
+  target := context.loopTarget!
+  effect(context, "jump", concatValues([if continuing then target.continueName else target.breakName], bindingValues(context, target.locals)))
+  context.terminated = true
+}
+
+function lowerTryStatement(context: FunctionLowering, statement: TryStatement): none {
+  let operand: Expression | none = none
+  let name = "_"
+  let mutable = false
+  case statement.binding {
+    binding: ImmutableBinding -> {
+      if binding.else_ != none { context.failed = "try binding else handlers are not supported by doof-wasm"; return }
+      operand = binding.value; name = binding.name
+    }
+    binding: ReadonlyDeclaration -> { operand = binding.value; name = binding.name }
+    binding: ConstDeclaration -> { operand = binding.value; name = binding.name }
+    binding: LetDeclaration -> { operand = binding.value; name = binding.name; mutable = true }
+    binding: ExpressionStatement -> { operand = binding.expression }
+    _ -> { context.failed = "try destructuring is not supported by doof-wasm"; return }
+  }
+  let valueType: ResolvedType | none = none
+  if operand!.resolvedType != none {
+    case operand!.resolvedType! { resultType: ResultResolvedType -> { valueType = resultType.valueType } _ -> { } }
+  }
+  operation := UnaryExpression { kind: "unary-expression", operator: "try", prefix: true, operand: operand!, resolvedType: valueType, span: statement.span }
+  emitted := lowerTryOperator(context, operation, operation)
+  if name != "_" { context.bindings.push(SourceBinding { name, typeName: annotationName(valueType), valueName: emitted, mutable }) }
+}
+
+function propertyExpression(property: ObjectProperty): Expression {
+  if property.value != none { return property.value! }
+  return Identifier { kind: "identifier", name: property.name, resolvedType: property.resolvedType, resolvedBinding: property.resolvedBinding, span: property.span }
+}
+
+function lowerReceiver(context: FunctionLowering, member: MemberExpression): string {
+  owner := lowerExpression(context, member.object)
+  if member.force && typeFromValue(member.object) == "any" {
+    target := nonNoneTypeName(member.object.resolvedType)
+    if target == "" || target == "any" { context.failed = "forced member access needs one concrete non-none receiver type"; return "" }
+    return result(context, "cast", [owner, target], target)
+  }
+  return owner
 }

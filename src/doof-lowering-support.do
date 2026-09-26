@@ -16,7 +16,23 @@ export class SourceBinding {
   boxedTypeName: string = ""
 }
 
+export class SourceConstant {
+  name: string
+  modulePath: string
+  value: Expression
+}
+
+export class LoopTarget {
+  breakName: string
+  continueName: string
+  locals: SourceBinding[]
+}
+
 export class FunctionLowering {
+  constants: SourceConstant[] = []
+  expandingConstants: string[] = []
+  let loopTarget: LoopTarget | none = none
+
   blocks: MinusBlock[] = []
   let currentBlock: MinusBlock
   bindings: SourceBinding[] = []
@@ -178,6 +194,9 @@ export function blockContext(parent: FunctionLowering, locals: SourceBinding[], 
     params.push(MinusValue { name: valueName, typeName: storageType })
     child.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
   }
+  for constant of parent.constants { child.constants.push(constant) }
+  for name of parent.expandingConstants { child.expandingConstants.push(name) }
+  child.loopTarget = parent.loopTarget
   child.sourcePath = parent.sourcePath
   child.module_ = parent.module_
   child.closureIndex = parent.closureIndex

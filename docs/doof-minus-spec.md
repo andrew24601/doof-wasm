@@ -88,6 +88,7 @@ Supported instructions are:
 | --- | --- |
 | `%r:T = const literal` | Primitive constant; `char` uses a decimal byte value |
 | `%r:T = add/sub/mul/div %a, %b` | Matching numeric operands and result |
+| `%r:T = rem %a, %b` | Matching `byte`, `int`, or `long` operands; signed remainder for `int`/`long`, unsigned for `byte`; division by zero traps |
 | `%r:bool = eq/lt %a, %b` | Matching numeric operands; `eq` also accepts `bool`, `char`, `none`, enums, references, and `any`; `lt` also accepts `char` |
 | `%r:T = convert %a` | Explicit conversion between numeric types |
 | `%r:T = copy %a` | Copy a value; retains references |

@@ -25,12 +25,15 @@ a shared mutable cell so writes from either side remain visible. The CLI resolve
   read-only `char[]` wrapper. Distinct string literals are built once when the
   Wasm module starts and shared; `.length`, indexed character reads,
   content-based comparison operators, `.compare(other)`, `.indexOf(search)`,
-  `.contains(search)`, `.startsWith(prefix)`, `.endsWith(suffix)`, and
-  `.substring(start[, end])` are supported. String interpolation and other
-  string methods are not supported yet. Other collection values are not
+  `.contains(search)`, `.startsWith(prefix)`, `.endsWith(suffix)`,
+  `.substring(start[, end])`, `.split(separator)`, string concatenation, and
+  `string(value)` for `int`, `long`, `byte`, `bool`, `char`, and strings are
+  supported. String interpolation and other string methods are not supported yet. Other collection values are not
   supported by lowering yet.
-Generics, string-backed enums, loop labels, `break`, `continue`, and loop `else`
-clauses are not supported yet.
+Scalar top-level constants and type aliases, compound arithmetic assignments,
+short-circuit `&&`/`||`, integer division and remainder, unlabeled `break` and
+`continue`, and plain `try` Result propagation are supported. Generics,
+string-backed enums, loop labels, and loop `else` clauses are not supported yet.
 
 ```sh
 doof run src/doof-cli.do -- example.do example.wasm
@@ -69,7 +72,9 @@ module graphs, `compileDoofWasmSources(sources, entry, loader)` and
 the matching JavaScript bindings.
 The initial parser and type-checking adapter uses the full Doof compiler as a
 local build dependency; replacing that adapter with the embedded subset's own
-front end is part of making doof-wasm self-hosting. See
+front end is part of making doof-wasm self-hosting. The current
+[doof-minus bootstrap attempt](docs/self-hosting.md) records the remaining
+source and runtime blockers. See
 [the source subset notes](docs/doof-wasm-spec.md) for the current boundary.
 
 See the [language specification](docs/doof-minus-spec.md) for syntax and the [memory layout](docs/memory-layout.md) for the Wasm representation and ownership rules.

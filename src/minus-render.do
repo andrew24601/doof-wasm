@@ -37,7 +37,7 @@ function renderInstruction(instruction: MinusInstruction): string {
   prefix := renderedResult(instruction)
   op := instruction.op
   if op == "const" { return prefix + "const " + joined(args) }
-  if ["add", "sub", "mul", "div", "eq", "lt"].contains(op) { return prefix + op + " " + joined(args) }
+  if ["add", "sub", "mul", "div", "rem", "eq", "lt"].contains(op) { return prefix + op + " " + joined(args) }
   if op == "new" { return prefix + "new " + args[0] + "(" + joined(args, 1) + ")" }
   if op == "get" { return prefix + "get " + args[0] + "." + args[1] }
   if op == "set" { return "set " + args[0] + "." + args[1] + " = " + args[2] }

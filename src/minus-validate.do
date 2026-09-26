@@ -144,10 +144,11 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         }
         return Success(resultType)
     }
-    if ["add", "sub", "mul", "div", "eq", "lt"].contains(op) {
+    if ["add", "sub", "mul", "div", "rem", "eq", "lt"].contains(op) {
         if args.length != 2 { return Failure(problem(line, op + " needs two operands")) }
         try left := valueType(values, args[0], line)
         try right := valueType(values, args[1], line)
+        if op == "rem" && !["byte", "int", "long"].contains(left) { return Failure(problem(line, "rem needs integer operands")) }
         if left != right || (!numeric(left) && !(op == "eq" && (left == "bool" || left == "char" || left == "none" || reference(module_, left) || enumByName(module_, left) != none)) && !(op == "lt" && left == "char")) {
             return Failure(problem(line, op + " needs matching supported operands"))
         }

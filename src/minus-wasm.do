@@ -698,12 +698,6 @@ function stringConstantIndex(constants: string[], value: string): int {
     panic("validated string constant missing from pool")
 }
 
-function arrayDataBlockSize(length: int): int {
-    let size = 24
-    if length > 16 { size = 24 + ((length - 16 + 15) \ 16) * 16 }
-    return size
-}
-
 function emitStringPoolInitializer(module_: MinusModule, constants: string[]): int[] {
     let bytes: int[] = []
     let charArray = classByName(module_, "__doof_array_char")
@@ -712,12 +706,13 @@ function emitStringPoolInitializer(module_: MinusModule, constants: string[]): i
     let stringCharsField = fieldIndex(stringClass, "chars")
     for index of 0..<constants.length {
         value := constants[index]
-        // Build the char[] backing block. Array-data blocks keep their length
-        // in the header and their elements immediately after the 8-byte header.
-        i32(bytes, arrayDataBlockSize(value.length)); i32(bytes, ARRAY_DATA_TAG); call(bytes, runtimeFunctionIndex(module_, 0)); localSet(bytes, 0)
-        localGet(bytes, 0); i32(bytes, value.length); store32(bytes, 4)
+        // Use the same compact/radix layout as runtime array allocation.
+        i32(bytes, value.length); localSet(bytes, 12)
+        emitArrayAllocation(bytes, module_, 0, 12, "char")
         for charIndex of 0..<value.length {
-            localGet(bytes, 0); i32(bytes, int(value[charIndex])); store(bytes, "char", 8 + charIndex)
+            i32(bytes, charIndex); localSet(bytes, 12)
+            arrayAddress(bytes, module_, [], "", "", "char", 10, 12, 0)
+            i32(bytes, int(value[charIndex])); store(bytes, "char", 0)
         }
 
         // The char[] wrapper takes ownership of the backing data block.
@@ -768,6 +763,7 @@ function arithmeticCode(typeName: string, operation: string): int {
         if operation == "sub" { return 125 }
         if operation == "mul" { return 126 }
         if operation == "div" { return 127 }
+        if operation == "rem" { return 129 }
         if operation == "eq" { return 81 }
         return 83
     }
@@ -791,6 +787,7 @@ function arithmeticCode(typeName: string, operation: string): int {
     if operation == "sub" { return 107 }
     if operation == "mul" { return 108 }
     if operation == "div" { return if typeName == "byte" then 110 else 109 }
+    if operation == "rem" { return if typeName == "byte" then 112 else 111 }
     if operation == "eq" { return 70 }
     return if typeName == "byte" || typeName == "char" then 73 else 72
 }
@@ -1047,7 +1044,7 @@ function emitInstruction(bytes: int[], module_: MinusModule, function_: MinusFun
         setResult(bytes, module_, values, instruction)
         return
     }
-    if ["add", "sub", "mul", "div", "eq", "lt"].contains(operation) {
+    if ["add", "sub", "mul", "div", "rem", "eq", "lt"].contains(operation) {
         getValue(bytes, values, args[0]); getValue(bytes, values, args[1])
         typeName := valueType(values, args[0])
         op(bytes, arithmeticCode(typeName, operation))
@@ -1140,7 +1137,7 @@ export function encodeDoofMinus(module_: MinusModule, debugHeap: bool = false): 
         for _ of 0..<11 { locals.push(127) } // radix array scratch locals
         body(code, locals, emitUserFunction(module_, function_))
     }
-    if constants.length > 0 { body(code, [127, 127, 127], emitStringPoolInitializer(module_, constants)) }
+    if constants.length > 0 { body(code, [127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127], emitStringPoolInitializer(module_, constants)) }
     section(bytes, 10, code)
     let result: byte[] = []
     for value of bytes { result.push(byte(value)) }

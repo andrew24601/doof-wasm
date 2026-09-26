@@ -247,3 +247,36 @@ for(const value of [0,-0,Infinity,-Infinity,7.5,NaN]) {
 }
 `)
 }
+
+export function testStringBridgeAcrossChunkAndRadixBoundaries(): none {
+  let literal = ""
+  for index of 0..<1025 { literal = literal + "z" }
+  checkArrays(`
+import function echo(value: string): string
+export function identity(value: string): string { return value }
+export function forwarded(value: string): string { return echo(value) }
+export function middle(value: string, start: int, end: int): string { return value.substring(start, end) }
+export function length(value: string): int { return value.length }
+export function literal(): string { return "${literal}" }
+`, "string-bridge", `
+for (const length of [0,1,16,17,1023,1024,1025,2048,2049,8193,262144,262145]) {
+  const text = Array.from({length}, (_,i) => String.fromCharCode(i % 256)).join('');
+  assert.strictEqual(api.identity(text),text,'export round trip '+length);
+  assert.strictEqual(api.forwarded(text),text,'host import round trip '+length);
+  assert.strictEqual(api.length(text),length);
+  if (length > 1024) assert.strictEqual(api.middle(text,1019,Math.min(length,2053)),text.substring(1019,Math.min(length,2053)));
+  assert.deepStrictEqual(live(),baseline,'strings must be released at '+length);
+}
+assert.strictEqual(api.literal(),'z'.repeat(1025),'long literals use chunked storage');
+const end = instance.exports.__doof_debug_heap_end.value;
+for (let i=0;i<3;i++) {
+  assert.strictEqual(api.forwarded('x'.repeat(262145)),'x'.repeat(262145));
+  assert.deepStrictEqual(live(),baseline,'reused directories must be initialized');
+}
+assert.strictEqual(instance.exports.__doof_debug_heap_end.value,end,'string blocks must be reused');
+assert.throws(() => api.identity('x'.repeat(1025)+'\\u0100'),RangeError);
+assert.throws(() => api.forwarded('\\ud83d\\ude00'),RangeError);
+assert.throws(() => api.identity(42),TypeError);
+assert.deepStrictEqual(live(),baseline,'invalid input must not allocate');
+`)
+}

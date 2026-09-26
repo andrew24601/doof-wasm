@@ -2,10 +2,11 @@
 import { analyzeWithLoader } from "doof/src/frontend"
 import { SourceFile, Diagnostic } from "doof/src/semantic"
 import { AnalysisResult, ModuleInfo } from "doof/src/analyzer"
-import { EnumDeclaration } from "doof/src/ast"
+import { EnumDeclaration, ReadonlyDeclaration, ConstDeclaration, ImmutableBinding } from "doof/src/ast"
 import { SourceLoader, noSourceLoader } from "doof/src/resolver"
 import { encodeDoofMinus } from "./minus-wasm"
 import { validateDoofMinus } from "./minus-validate"
+import { SourceConstant } from "./doof-lowering-support"
 import { lowerDoofProgram } from "./doof-lowering"
 import { MinusModule } from "./minus-ir"
 import { renderDoofMinus } from "./minus-render"
@@ -66,8 +67,19 @@ export function lowerDoofWasmSources(sources: SourceFile[], entry: string, loade
       }
     }
   }
+  let constants: SourceConstant[] = []
   for module of frontend.analysis.modules {
-    result := lowerDoofProgram(module.program, module.path, entryPath, enumDeclarations, enumModules)
+    for statement of module.program.statements {
+      case statement {
+        value: ReadonlyDeclaration -> { constants.push(SourceConstant { name: value.name, modulePath: module.path, value: value.value }) }
+        value: ConstDeclaration -> { constants.push(SourceConstant { name: value.name, modulePath: module.path, value: value.value }) }
+        value: ImmutableBinding -> { constants.push(SourceConstant { name: value.name, modulePath: module.path, value: value.value }) }
+        _ -> { }
+      }
+    }
+  }
+  for module of frontend.analysis.modules {
+    result := lowerDoofProgram(module.program, module.path, entryPath, enumDeclarations, enumModules, constants)
     case result {
       success: Success<MinusModule> -> { merge(lowered, success.value) }
       failure: Failure<string> -> { return Failure(module.path + ": " + failure.error) }

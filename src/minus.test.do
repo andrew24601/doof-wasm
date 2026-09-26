@@ -734,3 +734,45 @@ export function testDiagnostics(): none {
     oversized += "end"
     rejected(oversized, "class allocation exceeds 1032 bytes")
 }
+
+export function testRemainderRejectsNonIntegerOperands(): none {
+    rejected(`export func remainder(%a:double, %b:double) -> double
+block entry
+%result:double = rem %a, %b
+return %result
+end`, "rem needs integer operands")
+    rejected(`export func remainder(%a:int, %b:long) -> int
+block entry
+%result:int = rem %a, %b
+return %result
+end`, "rem needs matching supported operands")
+}
+
+export function testIntegerRemainderInstructionsExecuteAcrossWidths(): none {
+    runWasm(`export func byteRemainder(%a:byte, %b:byte) -> byte
+block entry
+%r:byte = rem %a, %b
+return %r
+end
+export func intRemainder(%a:int, %b:int) -> int
+block entry
+%r:int = rem %a, %b
+return %r
+end
+export func longRemainder(%a:long, %b:long) -> long
+block entry
+%r:long = rem %a, %b
+return %r
+end`, "integer-remainder", `
+const fs=require('fs'),assert=require('assert');
+WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(({instance})=>{
+ const e=instance.exports;
+ assert.strictEqual(e.byteRemainder(255,128),127);
+ assert.strictEqual(e.intRemainder(-129,128),-1);
+ assert.strictEqual(e.longRemainder(-129n,128n),-1n);
+ assert.strictEqual(e.intRemainder(-2147483648,-1),0);
+ assert.strictEqual(e.longRemainder(-9223372036854775808n,-1n),0n);
+ assert.throws(()=>e.byteRemainder(1,0),WebAssembly.RuntimeError);
+}).catch(error=>{console.error(error);process.exit(1)});
+`)
+}
