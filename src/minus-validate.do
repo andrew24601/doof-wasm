@@ -1,63 +1,66 @@
+import { MinusControlFlow, minusBlocks, analyzeMinusControlFlow, minusDominates, validateMinusRegions } from "./minus-control-flow"
 import { parseByte, parseDouble, parseFloat, parseInt, parseLong } from "std/parse"
-import { MinusBlock, MinusClass, MinusEnum, MinusField, MinusFunction, MinusImport, MinusInstruction, MinusInterface, MinusMethod, MinusModule, MinusValue } from "./minus-ir"
+import { MinusBlock, MinusClass, MinusEnum, MinusField, MinusFunction, MinusImport, MinusInstruction, MinusInterface, MinusMethod, MinusModule, MinusValue, MinusNameIndex, createMinusNameIndex, lookupMinusName, insertMinusName, minusModuleLookup } from "./minus-ir"
 import { classSize } from "./minus-layout"
 
 readonly MAX_BLOCK_SIZE = 1032
 
 function problem(line: int, message: string): string => "line " + string(line) + ": " + message
 
+// Declaration lookups use the module's hashed name indexes; linear scans made
+// validation quadratic in the number of classes and functions.
 function classByName(module_: MinusModule, name: string): MinusClass | none {
-    for item of module_.classes { if item.name == name { return item } }
-    return none
+    index := lookupMinusName(minusModuleLookup(module_).classes, name)
+    return if index < 0 then none else module_.classes[index]
 }
 
 function interfaceByName(module_: MinusModule, name: string): MinusInterface | none {
-    for item of module_.interfaces { if item.name == name { return item } }
-    return none
+    index := lookupMinusName(minusModuleLookup(module_).interfaces, name)
+    return if index < 0 then none else module_.interfaces[index]
 }
 
 function enumByName(module_: MinusModule, name: string): MinusEnum | none {
-    for item of module_.enums { if item.name == name { return item } }
-    return none
+    index := lookupMinusName(minusModuleLookup(module_).enums, name)
+    return if index < 0 then none else module_.enums[index]
 }
 
 function functionByName(module_: MinusModule, name: string): MinusFunction | none {
-    for item of module_.functions { if item.name == name { return item } }
-    for item of module_.imports {
-        if item.name == name { return MinusFunction { name: item.name, params: item.params, result: item.result, line: item.line, sourcePath: item.sourcePath } }
-    }
-    return none
+    lookup := minusModuleLookup(module_)
+    index := lookupMinusName(lookup.functions, name)
+    if index >= 0 { return module_.functions[index] }
+    importIndex := lookupMinusName(lookup.imports, name)
+    if importIndex < 0 { return none }
+    item := module_.imports[importIndex]
+    return MinusFunction { name: item.name, params: item.params, result: item.result, line: item.line, sourcePath: item.sourcePath }
 }
 
-function blockByName(function_: MinusFunction, name: string): MinusBlock | none {
-    for item of function_.blocks { if item.name == name { return item } }
-    return none
-}
-
-function primitive(typeName: string): bool => ["none", "bool", "char", "byte", "int", "long", "float", "double"].contains(typeName)
-function numeric(typeName: string): bool => ["byte", "int", "long", "float", "double"].contains(typeName)
+function numeric(typeName: string): bool => typeName == "byte" || typeName == "int" || typeName == "long" || typeName == "float" || typeName == "double"
+function primitive(typeName: string): bool => typeName == "none" || typeName == "bool" || typeName == "char" || numeric(typeName)
 function reference(module_: MinusModule, typeName: string): bool => typeName == "any" || classByName(module_, typeName) != none || interfaceByName(module_, typeName) != none
-function arrayElementType(module_: MinusModule, typeName: string): bool => ["bool", "char", "byte", "int", "long", "float", "double"].contains(typeName) || reference(module_, typeName) || enumByName(module_, typeName) != none
+function arrayElementType(module_: MinusModule, typeName: string): bool => (typeName != "none" && primitive(typeName)) || reference(module_, typeName) || enumByName(module_, typeName) != none
 function hostExportType(module_: MinusModule, typeName: string): bool => !reference(module_, typeName) || typeName == "__doof_string"
 
-function identifier(name: string): bool {
-    if name == "" { return false }
-    letters := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
-    digits := "0123456789"
-    if !letters.contains(name.substring(0, 1)) { return false }
-    for index of 1..<name.length {
-        ch := name.substring(index, index + 1)
-        if !letters.contains(ch) && !digits.contains(ch) { return false }
+function letter(code: int): bool => (code >= 97 && code <= 122) || (code >= 65 && code <= 90) || code == 95
+
+// ASCII letters or underscore, then letters, digits or underscores, in
+// name[start..<end]. Character codes avoid a substring per character.
+function identifierRange(name: string, start: int, end_: int): bool {
+    if start >= end_ || !letter(int(name[start])) { return false }
+    for index of (start + 1)..<end_ {
+        code := int(name[index])
+        if !letter(code) && !(code >= 48 && code <= 57) { return false }
     }
     return true
 }
 
-function valueName(name: string): bool => name.startsWith("%") && identifier(name.substring(1, name.length))
+function identifier(name: string): bool => identifierRange(name, 0, name.length)
+
+function valueName(name: string): bool => name.startsWith("%") && identifierRange(name, 1, name.length)
 
 function functionName(name: string): bool {
-    parts := name.split(".")
-    if parts.length == 1 { return identifier(parts[0]) }
-    return parts.length == 2 && identifier(parts[0]) && identifier(parts[1])
+    dot := name.indexOf(".")
+    if dot < 0 { return identifier(name) }
+    return identifierRange(name, 0, dot) && identifierRange(name, dot + 1, name.length)
 }
 
 function checkType(module_: MinusModule, typeName: string, line: int): Result<none, string> {
@@ -78,12 +81,39 @@ function methodIn(interface_: MinusInterface, methodName: string): MinusMethod |
     return none
 }
 
-function valueType(values: MinusValue[], name: string, line: int): Result<string, string> {
-    for value of values { if value.name == name { return Success(value.typeName) } }
+// The values of one function, indexed once. A value is visible at a use when
+// it is a function parameter, was defined earlier in the same block, or was
+// defined in a block that dominates the using block.
+class ValueScope {
+    names: MinusNameIndex = MinusNameIndex {}
+    types: string[] = []
+    definingBlocks: int[] = []
+    positions: int[] = []
+    blocks: MinusBlock[] = []
+    blockNames: MinusNameIndex = MinusNameIndex {}
+    let flow: MinusControlFlow = MinusControlFlow {}
+    let block: int = 0
+    let position: int = 0
+}
+
+function valueType(values: ValueScope, name: string, line: int): Result<string, string> {
+    id := lookupMinusName(values.names, name)
+    if id >= 0 {
+        source := values.definingBlocks[id]
+        if source < 0 { return Success(values.types[id]) }
+        if source == values.block {
+            if values.positions[id] < values.position { return Success(values.types[id]) }
+        } else if minusDominates(values.flow, source, values.block) { return Success(values.types[id]) }
+    }
     return Failure(problem(line, "unknown or out-of-block value " + name))
 }
 
-function checkArgs(values: MinusValue[], args: string[], expected: string[], line: int): Result<none, string> {
+function blockByName(values: ValueScope, name: string): MinusBlock | none {
+    index := lookupMinusName(values.blockNames, name)
+    return if index < 0 then none else values.blocks[index]
+}
+
+function checkArgs(values: ValueScope, args: string[], expected: string[], line: int): Result<none, string> {
     if args.length != expected.length { return Failure(problem(line, "expected " + string(expected.length) + " positional arguments, got " + string(args.length))) }
     for index of 0..<args.length {
         try actual := valueType(values, args[index], line)
@@ -124,19 +154,24 @@ function checkLiteral(module_: MinusModule, instruction: MinusInstruction, typeN
     return Failure(problem(instruction.line, "const needs a primitive or enum result"))
 }
 
-function checkEdge(function_: MinusFunction, values: MinusValue[], args: string[], line: int): Result<none, string> {
+function checkEdge(blocks: MinusBlock[], values: ValueScope, args: string[], line: int): Result<none, string> {
     if args.length == 0 { return Failure(problem(line, "missing block target")) }
-    block := blockByName(function_, args[0])
+    block := blockByName(values, args[0])
     if block == none { return Failure(problem(line, "unknown block " + args[0])) }
     return checkArgs(values, tail(args, 1), paramTypes(block!.params), line)
 }
 
-function checkInstruction(module_: MinusModule, function_: MinusFunction, values: MinusValue[], instruction: MinusInstruction): Result<string | none, string> {
+function checkInstruction(module_: MinusModule, function_: MinusFunction, blocks: MinusBlock[], values: ValueScope, instruction: MinusInstruction): Result<string | none, string> {
     args := instruction.args
     line := instruction.line
     op := instruction.op
     resultType := if instruction.result == none then "none" else instruction.result!.typeName
     if op == "const" { try checkLiteral(module_, instruction, resultType); return Success(resultType) }
+    if op == "global-get" {
+        if args.length != 1 { return Failure(problem(line, "global-get needs one global name")) }
+        for global_ of module_.globals { if global_.name == args[0] { return Success(global_.typeName) } }
+        return Failure(problem(line, "unknown global " + args[0]))
+    }
     if op == "string-const" {
         if args.length != 1 { return Failure(problem(line, "string-const needs one literal")) }
         if resultType != "__doof_string" || classByName(module_, resultType) == none {
@@ -144,11 +179,11 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         }
         return Success(resultType)
     }
-    if ["add", "sub", "mul", "div", "rem", "eq", "lt"].contains(op) {
+    if (op == "add" || op == "sub" || op == "mul" || op == "div" || op == "rem" || op == "eq" || op == "lt") {
         if args.length != 2 { return Failure(problem(line, op + " needs two operands")) }
         try left := valueType(values, args[0], line)
         try right := valueType(values, args[1], line)
-        if op == "rem" && !["byte", "int", "long"].contains(left) { return Failure(problem(line, "rem needs integer operands")) }
+        if op == "rem" && !(left == "byte" || left == "int" || left == "long") { return Failure(problem(line, "rem needs integer operands")) }
         if left != right || (!numeric(left) && !(op == "eq" && (left == "bool" || left == "char" || left == "none" || reference(module_, left) || enumByName(module_, left) != none)) && !(op == "lt" && left == "char")) {
             return Failure(problem(line, op + " needs matching supported operands"))
         }
@@ -183,6 +218,23 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         if handleType != "int" { return Failure(problem(line, "array-length needs an int block handle")) }
         return Success("int")
     }
+    if op == "array-copy" {
+        if args.length != 6 { return Failure(problem(line, "array-copy needs destination/index, source/index, count, and scalar element type")) }
+        for index of 0..<5 {
+            try typeName := valueType(values, args[index], line)
+            if typeName != "int" { return Failure(problem(line, "array-copy handles, indexes, and count need int")) }
+        }
+        if !arrayElementType(module_, args[5]) || reference(module_, args[5]) { return Failure(problem(line, "array-copy needs a scalar element type")) }
+        return Success(none)
+    }
+    if op == "array-compare" || op == "array-equal" {
+        if args.length != 2 { return Failure(problem(line, op + " needs two byte-array handles")) }
+        for arg of args {
+            try typeName := valueType(values, arg, line)
+            if typeName != "int" { return Failure(problem(line, op + " handles need int")) }
+        }
+        return Success(if op == "array-equal" then "bool" else "int")
+    }
     if op == "array-get" {
         if args.length != 2 { return Failure(problem(line, "array-get needs a block handle and index")) }
         try handleType := valueType(values, args[0], line)
@@ -190,6 +242,21 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         if handleType != "int" || indexType != "int" { return Failure(problem(line, "array-get needs int handle and index")) }
         if !arrayElementType(module_, resultType) { return Failure(problem(line, "unsupported array element type " + resultType)) }
         return Success(resultType)
+    }
+    if op == "array-pop" {
+        if args.length != 1 { return Failure(problem(line, "array-pop needs one block handle")) }
+        try handleType := valueType(values, args[0], line)
+        if handleType != "int" { return Failure(problem(line, "array-pop needs an int block handle")) }
+        if !arrayElementType(module_, resultType) { return Failure(problem(line, "unsupported array element type " + resultType)) }
+        return Success(resultType)
+    }
+    if op == "array-reserve" {
+        if args.length != 3 { return Failure(problem(line, "array-reserve needs a block handle, capacity, and element type")) }
+        try handleType := valueType(values, args[0], line)
+        try capacityType := valueType(values, args[1], line)
+        if handleType != "int" || capacityType != "int" { return Failure(problem(line, "array-reserve needs int handle and capacity")) }
+        if !arrayElementType(module_, args[2]) { return Failure(problem(line, "unsupported array element type " + args[2])) }
+        return Success("int")
     }
     if op == "array-push" {
         if args.length != 2 { return Failure(problem(line, "array-push needs a block handle and value")) }
@@ -257,7 +324,7 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         try source := valueType(values, args[0], line)
         if op == "copy" { return Success(source) }
         if op == "box" {
-            if source == "any" || interfaceByName(module_, source) != none { return Failure(problem(line, "box needs a primitive, enum, or concrete class")) }
+            if source == "any" { return Failure(problem(line, "box needs a primitive, enum, class, or interface")) }
             return Success("any")
         }
         if op == "as" {
@@ -265,7 +332,7 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
             if class_ == none || !class_!.interfaces.contains(resultType) { return Failure(problem(line, "class does not implement " + resultType)) }
             return Success(resultType)
         }
-        if (!numeric(source) && enumByName(module_, source) == none) || !numeric(resultType) { return Failure(problem(line, "convert needs a numeric or enum source and numeric result")) }
+        if (!numeric(source) && source != "char" && enumByName(module_, source) == none) || !numeric(resultType) { return Failure(problem(line, "convert needs a numeric, char, or enum source and numeric result")) }
         return Success(resultType)
     }
     if op == "is" || op == "cast" {
@@ -273,7 +340,7 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         try source := valueType(values, args[0], line)
         if source != "any" { return Failure(problem(line, op + " needs any")) }
         try checkType(module_, args[1], line)
-        if args[1] == "any" || interfaceByName(module_, args[1]) != none { return Failure(problem(line, op + " needs a primitive or concrete class target")) }
+        if args[1] == "any" { return Failure(problem(line, op + " needs a primitive, class, or interface target")) }
         return Success(if op == "is" then "bool" else args[1])
     }
     if op == "return" {
@@ -284,10 +351,14 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         return Success(none)
     }
     if op == "panic" {
-        if args.length != 0 { return Failure(problem(line, "panic takes no lowered arguments")) }
+        if args.length > 1 || (args.length == 1 && !module_.recoverPanics) { return Failure(problem(line, "panic message requires self-hosting panic recovery")) }
+        if args.length == 1 {
+            try messageType := valueType(values, args[0], line)
+            if messageType != "__doof_string" { return Failure(problem(line, "panic message must be a string")) }
+        }
         return Success(none)
     }
-    if op == "jump" { try checkEdge(function_, values, args, line); return Success(none) }
+    if op == "jump" { try checkEdge(blocks, values, args, line); return Success(none) }
     if op == "branch" {
         if args.length < 4 { return Failure(problem(line, "branch needs two targets")) }
         try condition := valueType(values, args[0], line)
@@ -297,26 +368,39 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, values
         if split < 0 { return Failure(problem(line, "branch needs two targets")) }
         let first: string[] = []
         for index of 1..<split { first.push(args[index]) }
-        try checkEdge(function_, values, first, line)
-        try checkEdge(function_, values, tail(args, split + 1), line)
+        try checkEdge(blocks, values, first, line)
+        try checkEdge(blocks, values, tail(args, split + 1), line)
         return Success(none)
     }
     return Failure(problem(line, "unknown instruction " + op))
 }
 
 export function validateDoofMinus(module_: MinusModule): Result<none, string> {
+    for index of 0..<module_.globals.length {
+        global_ := module_.globals[index]
+        if !identifier(global_.name) { return Failure(problem(global_.line, "invalid global name")) }
+        try checkType(module_, global_.typeName, global_.line)
+        if global_.typeName == "none" { return Failure(problem(global_.line, "global cannot have type none")) }
+        for previous of 0..<index { if module_.globals[previous].name == global_.name { return Failure(problem(global_.line, "duplicate global")) } }
+        let initializer: MinusFunction | none = none
+        initializerIndex := lookupMinusName(minusModuleLookup(module_).functions, global_.initializer)
+        if initializerIndex >= 0 { initializer = module_.functions[initializerIndex] }
+        if initializer == none || initializer!.exported || initializer!.capturePanics || initializer!.params.length != 0 || initializer!.result != global_.typeName {
+            return Failure(problem(global_.line, "global initializer must name a private function with no parameters returning its type"))
+        }
+    }
     for index of 0..<module_.classes.length {
         class_ := module_.classes[index]
         if !identifier(class_.name) { return Failure(problem(class_.line, "invalid class name")) }
         if primitive(class_.name) || class_.name == "any" { return Failure(problem(class_.line, "reserved class name")) }
-        for previous of 0..<index { if module_.classes[previous].name == class_.name { return Failure(problem(class_.line, "duplicate class")) } }
+        if lookupMinusName(minusModuleLookup(module_).classes, class_.name) != index { return Failure(problem(class_.line, "duplicate class")) }
         if interfaceByName(module_, class_.name) != none { return Failure(problem(class_.line, "class and interface names collide")) }
     }
     for index of 0..<module_.interfaces.length {
         interface_ := module_.interfaces[index]
         if !identifier(interface_.name) { return Failure(problem(interface_.line, "invalid interface name")) }
         if primitive(interface_.name) || interface_.name == "any" { return Failure(problem(interface_.line, "reserved interface name")) }
-        for previous of 0..<index { if module_.interfaces[previous].name == interface_.name { return Failure(problem(interface_.line, "duplicate interface")) } }
+        if lookupMinusName(minusModuleLookup(module_).interfaces, interface_.name) != index { return Failure(problem(interface_.line, "duplicate interface")) }
     }
     for owner of module_.classes {
         for index of 0..<owner.fields.length {
@@ -337,7 +421,7 @@ export function validateDoofMinus(module_: MinusModule): Result<none, string> {
         enum_ := module_.enums[index]
         if !identifier(enum_.name) || primitive(enum_.name) || enum_.name == "any" { return Failure(problem(enum_.line, "invalid enum name")) }
         if classByName(module_, enum_.name) != none || interfaceByName(module_, enum_.name) != none { return Failure(problem(enum_.line, "enum name collides with another type")) }
-        for previous of 0..<index { if module_.enums[previous].name == enum_.name { return Failure(problem(enum_.line, "duplicate enum")) } }
+        if lookupMinusName(minusModuleLookup(module_).enums, enum_.name) != index { return Failure(problem(enum_.line, "duplicate enum")) }
     }
     for owner of module_.interfaces {
         for index of 0..<owner.fields.length {
@@ -377,62 +461,91 @@ export function validateDoofMinus(module_: MinusModule): Result<none, string> {
     }
     for index of 0..<module_.functions.length {
         function_ := module_.functions[index]
+        if function_.capturePanics && (!module_.recoverPanics || function_.result != "any") { return Failure(problem(function_.line, "panic capture requires recovery mode and a Result represented as any")) }
+        if function_.capturePanics {
+            failure := classByName(module_, "__doof_result_failure")
+            if classByName(module_, "__doof_string") == none || failure == none { return Failure(problem(function_.line, "panic capture needs string and Failure runtime classes")) }
+            if failure!.fields.length != 1 || failure!.fields[0].typeName != "any" { return Failure(problem(function_.line, "panic capture needs a single boxed Failure error field")) }
+        }
         if !functionName(function_.name) { return Failure(problem(function_.line, "invalid function name")) }
-        for previous of 0..<index { if module_.functions[previous].name == function_.name { return Failure(problem(function_.line, "duplicate function")) } }
+        if lookupMinusName(minusModuleLookup(module_).functions, function_.name) != index { return Failure(problem(function_.line, "duplicate function")) }
         try checkType(module_, function_.result, function_.line)
         exportName := if function_.exportName == "" then function_.name else function_.exportName
-        if function_.exported && ["__doof_ffi_alloc", "__doof_ffi_release", "__doof_ffi_memory", "__doof_debug_heap_end"].contains(exportName) { return Failure(problem(function_.line, "export name is reserved by the Wasm host bindings")) }
+        if function_.exported && (exportName == "__doof_panic_tag" || exportName == "__doof_ffi_alloc" || exportName == "__doof_ffi_release" || exportName == "__doof_ffi_memory" || exportName == "__doof_debug_heap_end") { return Failure(problem(function_.line, "export name is reserved by the Wasm host bindings")) }
         if function_.exported && !hostExportType(module_, function_.result) { return Failure(problem(function_.line, "export result must be primitive or string")) }
-        let defined: MinusValue[] = []
+        blocks := minusBlocks(function_)
+        let valueCount = function_.params.length
+        for block of blocks {
+            valueCount += block.params.length
+            for instruction of block.instructions { if instruction.result != none { valueCount += 1 } }
+        }
+        values := ValueScope { names: createMinusNameIndex(valueCount), blockNames: createMinusNameIndex(blocks.length), blocks }
         for param of function_.params {
             if !valueName(param.name) { return Failure(problem(function_.line, "invalid parameter name")) }
             try checkType(module_, param.typeName, function_.line)
             if function_.exported && !hostExportType(module_, param.typeName) { return Failure(problem(function_.line, "export parameter must be primitive or string")) }
-            for known of defined { if known.name == param.name { return Failure(problem(function_.line, "duplicate parameter")) } }
-            defined.push(param)
+            if lookupMinusName(values.names, param.name) >= 0 { return Failure(problem(function_.line, "duplicate parameter")) }
+            _ := insertMinusName(values.names, param.name)
+            values.types.push(param.typeName); values.definingBlocks.push(-1); values.positions.push(-1)
         }
         dot := function_.name.indexOf(".")
         if dot >= 0 {
             className := function_.name.substring(0, dot)
             if classByName(module_, className) == none || function_.params.length == 0 || function_.params[0].typeName != className { return Failure(problem(function_.line, "class method needs a class receiver first")) }
         }
-        if function_.blocks.length == 0 { return Failure(problem(function_.line, "function needs a block")) }
-        if function_.blocks[0].params.length != 0 { return Failure(problem(function_.blocks[0].line, "entry block cannot have parameters")) }
-        for block of function_.blocks {
+        if blocks.length == 0 { return Failure(problem(function_.line, "function needs a block")) }
+        if blocks[0].params.length != 0 { return Failure(problem(blocks[0].line, "entry block cannot have parameters")) }
+        flow := analyzeMinusControlFlow(blocks)
+        values.flow = flow
+        for blockIndex_ of 0..<blocks.length {
+            block := blocks[blockIndex_]
             if !identifier(block.name) { return Failure(problem(block.line, "invalid block name")) }
-            for other of function_.blocks { if other != block && other.name == block.name { return Failure(problem(block.line, "duplicate block")) } }
+            if lookupMinusName(values.blockNames, block.name) >= 0 { return Failure(problem(block.line, "duplicate block")) }
+            _ := insertMinusName(values.blockNames, block.name)
             for param of block.params {
                 if !valueName(param.name) { return Failure(problem(block.line, "invalid block parameter name")) }
                 try checkType(module_, param.typeName, block.line)
-                for known of defined { if known.name == param.name { return Failure(problem(block.line, "duplicate value " + param.name)) } }
-                defined.push(param)
+                if lookupMinusName(values.names, param.name) >= 0 { return Failure(problem(block.line, "duplicate value " + param.name)) }
+                _ := insertMinusName(values.names, param.name)
+                values.types.push(param.typeName); values.definingBlocks.push(blockIndex_); values.positions.push(-1)
             }
         }
-        for block of function_.blocks {
-            if block.instructions.length == 0 { return Failure(problem(block.line, "empty block")) }
-            let available: MinusValue[] = []
-            for param of function_.params { available.push(param) }
-            for param of block.params { available.push(param) }
+        // Index every result before checking uses: a dominating block may be
+        // laid out after the block that uses its values.
+        for blockIndex_ of 0..<blocks.length {
+            block := blocks[blockIndex_]
             for position of 0..<block.instructions.length {
                 instruction := block.instructions[position]
-                terminal := ["return", "jump", "branch", "panic"].contains(instruction.op)
+                if instruction.result == none { continue }
+                if !valueName(instruction.result!.name) { return Failure(problem(instruction.line, "invalid value name")) }
+                if lookupMinusName(values.names, instruction.result!.name) >= 0 { return Failure(problem(instruction.line, "duplicate value " + instruction.result!.name)) }
+                _ := insertMinusName(values.names, instruction.result!.name)
+                values.types.push(instruction.result!.typeName); values.definingBlocks.push(blockIndex_); values.positions.push(position)
+            }
+        }
+        for blockIndex_ of 0..<blocks.length {
+            block := blocks[blockIndex_]
+            if block.instructions.length == 0 { return Failure(problem(block.line, "empty block")) }
+            values.block = blockIndex_
+            for position of 0..<block.instructions.length {
+                instruction := block.instructions[position]
+                values.position = position
+                terminal := instruction.op == "return" || instruction.op == "jump" || instruction.op == "branch" || instruction.op == "panic"
                 if terminal != (position == block.instructions.length - 1) { return Failure(problem(instruction.line, "block terminator must be last")) }
-                if instruction.result != none {
-                    if !valueName(instruction.result!.name) { return Failure(problem(instruction.line, "invalid value name")) }
-                    try checkType(module_, instruction.result!.typeName, instruction.line)
-                    for known of defined { if known.name == instruction.result!.name { return Failure(problem(instruction.line, "duplicate value " + instruction.result!.name)) } }
+                if instruction.result != none { try checkType(module_, instruction.result!.typeName, instruction.line) }
+                inferred := checkInstruction(module_, function_, blocks, values, instruction) else error {
+                    path := if instruction.sourcePath == "" then function_.sourcePath else instruction.sourcePath
+                    return Failure(if path == "" then error else path + ": " + error)
                 }
-                try inferred := checkInstruction(module_, function_, available, instruction)
                 if instruction.result == none {
                     if inferred != none { return Failure(problem(instruction.line, "operation needs a result")) }
                 } else {
                     if inferred == none { return Failure(problem(instruction.line, instruction.op + " does not produce a result")) }
                     if instruction.result!.typeName != inferred! { return Failure(problem(instruction.line, instruction.op + " result needs " + inferred!)) }
-                    defined.push(instruction.result!)
-                    available.push(instruction.result!)
                 }
             }
         }
+        if !validateMinusRegions(function_, flow) { return Failure(problem(function_.line, "invalid structured control flow: branches must target an enclosing scope or loop")) }
     }
     for index of 0..<module_.imports.length {
         import_ := module_.imports[index]
@@ -447,7 +560,7 @@ export function validateDoofMinus(module_: MinusModule): Result<none, string> {
                 }
             }
         }
-        for function_ of module_.functions { if function_.name == import_.name { return Failure(problem(import_.line, "host import conflicts with function")) } }
+        if lookupMinusName(minusModuleLookup(module_).functions, import_.name) >= 0 { return Failure(problem(import_.line, "host import conflicts with function")) }
         try checkType(module_, import_.result, import_.line)
         if !hostExportType(module_, import_.result) { return Failure(problem(import_.line, "host import result must be primitive or string")) }
         for parameter of import_.params {

@@ -7,6 +7,7 @@ export readonly STRING_CLASS = "__doof_string"
 export readonly RESULT_SUCCESS_CLASS = "__doof_result_success"
 export readonly RESULT_FAILURE_CLASS = "__doof_result_failure"
 export readonly ARRAY_CLASS_PREFIX = "__doof_array_type"
+export readonly STRING_BOOL_MAP_CLASS = "__doof_map_string_bool"
 
 export function arrayClassName(elementType: string): string {
   return ARRAY_CLASS_PREFIX + "_" + elementType

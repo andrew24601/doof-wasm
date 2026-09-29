@@ -2,6 +2,7 @@
   "name": "doof-wasm",
   "version": "0.2.0",
   "license": "ISC",
+  "resources": [{ "from": "std/wasm", "to": "wasm-stdlib" }],
   "dependencies": {
     "doof": { "path": "../doof-lang" }
   },

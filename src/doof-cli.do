@@ -1,36 +1,43 @@
 import { readText, writeBlob, writeText } from "std/fs"
 import { absolute } from "std/path"
-import { SourceFile, Diagnostic, SemanticLocation, SemanticSpan } from "doof/src/semantic"
-import { SourceLoader } from "doof/src/resolver"
-import { lowerDoofWasmSources } from "./doof-compiler"
+import { SourceFile, Diagnostic } from "doof/src/semantic"
+import { lowerDoofWasmSources, WasmLoweringOptions } from "./doof-compiler"
 import { renderDoofMinus } from "./minus-render"
 import { MinusModule } from "./minus-ir"
 import { encodeDoofMinus } from "./minus-wasm"
 import { renderDoofJs } from "./minus-js"
+import { nativeSourceEnvironment } from "./source-environment-native"
 
 function main(arguments: string[]): int {
-  if arguments.length == 3 && arguments[0] == "--dump-minus" {
-    return dumpMinus(arguments[1], arguments[2])
+  let selfHosting = false
+  let debugHeap = false
+  let dump = false
+  let start = 0
+  while start < arguments.length && arguments[start].startsWith("--") {
+    flag := arguments[start]
+    if flag == "--self-hosting" { selfHosting = true }
+    else if flag == "--debug-heap" { debugHeap = true }
+    else if flag == "--dump-minus" { dump = true }
+    else { println("unknown option: " + flag); return 2 }
+    start += 1
   }
-  if arguments.length == 3 && arguments[0] == "--debug-heap" {
-    return compileWithJs(arguments[1], arguments[2], true)
-  }
-  if arguments.length != 2 {
-    println("usage: doof-wasm input.do output.wasm (also writes output.js)")
-    println("       doof-wasm --debug-heap input.do output.wasm (adds heap inspection to output.js)")
-    println("       doof-wasm --dump-minus input.do output.dm")
+  if arguments.length - start != 2 {
+    println("usage: doof-wasm [--self-hosting] [--debug-heap | --dump-minus] input.do output")
     return 2
   }
-  return compileWithJs(arguments[0], arguments[1], false)
+  options := WasmLoweringOptions { boxImmutableStructs: selfHosting, synchronousAsync: selfHosting }
+  if dump { return dumpMinus(arguments[start], arguments[start + 1], options) }
+  return compileWithJs(arguments[start], arguments[start + 1], debugHeap, options)
 }
 
-function compileWithJs(inputPath: string, outputPath: string, debugHeap: bool): int {
+function compileWithJs(inputPath: string, outputPath: string, debugHeap: bool, options: WasmLoweringOptions): int {
   path := try! absolute(inputPath)
   source := readText(path) else {
     println("could not read " + inputPath)
     return 1
   }
-  lowered := lowerDoofWasmSources([SourceFile { path, source }], path, loadModule)
+  environment := nativeSourceEnvironment(path) else error { println(error); return 1 }
+  lowered := lowerDoofWasmSources([SourceFile { path, source }], path, (importPath: string): Result<SourceFile | none, Diagnostic> => environment.load(importPath), options)
   let module_: MinusModule | none = none
   case lowered {
     success: Success<MinusModule> -> { module_ = success.value }
@@ -54,13 +61,14 @@ function compileWithJs(inputPath: string, outputPath: string, debugHeap: bool): 
   return 0
 }
 
-function dumpMinus(inputPath: string, outputPath: string): int {
+function dumpMinus(inputPath: string, outputPath: string, options: WasmLoweringOptions): int {
   path := try! absolute(inputPath)
   source := readText(path) else {
     println("could not read " + inputPath)
     return 1
   }
-  lowered := lowerDoofWasmSources([SourceFile { path, source }], path, loadModule)
+  environment := nativeSourceEnvironment(path) else error { println(error); return 1 }
+  lowered := lowerDoofWasmSources([SourceFile { path, source }], path, (importPath: string): Result<SourceFile | none, Diagnostic> => environment.load(importPath), options)
   let module_: MinusModule | none = none
   case lowered {
     success: Success<MinusModule> -> { module_ = success.value }
@@ -71,15 +79,4 @@ function dumpMinus(inputPath: string, outputPath: string): int {
     return 1
   }
   return 0
-}
-
-function loadModule(path: string): Result<SourceFile | none, Diagnostic> {
-  source := readText(path) else {
-    location := SemanticLocation { line: 0, column: 0, offset: 0 }
-    return Failure(Diagnostic {
-      severity: "error", message: "could not read imported module " + path,
-      module: path, span: SemanticSpan { start: location, end: location },
-    })
-  }
-  return Success(SourceFile { path, source })
 }

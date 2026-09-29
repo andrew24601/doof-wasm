@@ -1,5 +1,6 @@
 import { MinusClass, MinusFunction, MinusImport, MinusModule } from "./minus-ir"
 import { classFieldOffset, classSize } from "./minus-layout"
+import { renderWasmStdHost } from "./wasm-std-host"
 
 function quoteJson(value: string): string {
     let result = "\""
@@ -183,7 +184,7 @@ export function renderDoofJs(module_: MinusModule, debugHeap: bool = false): str
     result = result + "  const memory = wasm.__doof_ffi_memory, alloc = wasm.__doof_ffi_alloc, release = wasm.__doof_ffi_release;\n"
     result = result + "  if (!memory || !alloc || !release) throw new Error('Doof FFI exports are missing');\n"
     result = result + "  const {makeString, readString} = createDoofStringBridge(wasm);\n"
-    result = result + "  const api = Object.create(null); for (const fn of exportedFunctions) { const raw = wasm[fn.name]; if (typeof raw !== 'function') throw new Error('missing Wasm export: ' + fn.name); api[fn.name] = (...args) => { if (args.length !== fn.params.length) throw new TypeError(fn.name + ' expects ' + fn.params.length + ' arguments'); const owned = []; let resultPointer = 0; try { const marshaled = args.map((value, index) => { if (fn.params[index] === '__doof_string') { const pointer = makeString(value); owned.push(pointer); return pointer; } if (fn.params[index] === 'bool') return value ? 1 : 0; return value; }); const value = raw(...marshaled); if (fn.result === '__doof_string') { resultPointer = value >>> 0; return readString(resultPointer); } if (fn.result === 'bool') return value !== 0; return value; } finally { if (fn.result === '__doof_string' && resultPointer) release(resultPointer); for (const pointer of owned) release(pointer); } }; } return api;\n}\n"
+    result = result + "  const api = Object.create(null); for (const fn of exportedFunctions) { const raw = wasm[fn.name]; if (typeof raw !== 'function') throw new Error('missing Wasm export: ' + fn.name); api[fn.name] = (...args) => { if (args.length !== fn.params.length) throw new TypeError(fn.name + ' expects ' + fn.params.length + ' arguments'); const owned = []; let resultPointer = 0; try { const marshaled = args.map((value, index) => { if (fn.params[index] === '__doof_string') { const pointer = makeString(value); owned.push(pointer); return pointer; } if (fn.params[index] === 'bool') return value ? 1 : 0; return value; }); const value = raw(...marshaled); if (fn.result === '__doof_string') { resultPointer = value >>> 0; return readString(resultPointer); } if (fn.result === 'bool') return value !== 0; return value; } catch (error) { const tag = wasm.__doof_panic_tag; if (tag && error instanceof WebAssembly.Exception && error.is(tag)) { const pointer = error.getArg(tag, 0) >>> 0; let message; try { message = readString(pointer); } finally { release(pointer); } throw new Error(message); } throw error; } finally { if (fn.result === '__doof_string' && resultPointer) release(resultPointer); for (const pointer of owned) release(pointer); } }; } return api;\n}\n"
     result = result + "export { createDoofModule };\n"
     result = result + "function createDoofImports(host = {}) {\n"
     result = result + "  let wasm = null; const imports = Object.create(null);\n"
@@ -193,6 +194,7 @@ export function renderDoofJs(module_: MinusModule, debugHeap: bool = false): str
     result = result + "  for (const fn of importedFunctions) { const callback = fn.module === 'doof' ? host[fn.importName] : host[fn.module]?.[fn.importName]; if (typeof callback !== 'function') throw new TypeError('missing host function ' + fn.module + '.' + fn.importName); if (!imports[fn.module]) imports[fn.module] = Object.create(null); imports[fn.module][fn.importName] = (...args) => { if (args.length !== fn.params.length) throw new TypeError(fn.importName + ' expects ' + fn.params.length + ' arguments'); const converted = args.map((value, index) => fn.params[index] === '__doof_string' ? readString(value >>> 0) : fn.params[index] === 'bool' ? value !== 0 : value); const value = callback(...converted); if (fn.result === '__doof_string') return makeString(value); if (fn.result === 'bool') return value ? 1 : 0; return value; }; }\n"
     result = result + "  return {imports, attach(instance) { wasm = instance.exports || instance; }};\n}\n"
     result = result + "export { createDoofImports };\n"
+    result = result + renderWasmStdHost()
     if !debugHeap { return result }
     result = result + "const primitiveTags = ['none','bool','char','byte','int','long','float','double'];\n"
     result = result + "function createDoofHeapInspector(instance) {\n"

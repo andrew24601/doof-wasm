@@ -280,3 +280,182 @@ assert.throws(() => api.identity(42),TypeError);
 assert.deepStrictEqual(live(),baseline,'invalid input must not allocate');
 `)
 }
+
+export function testPassiveLiteralPoolLargeLiteralsAndMultipleInitializers(): none {
+  literal := ("z".repeat(1024) + "\\0").repeat(256) + "!"
+  let entries = ""
+  for index of 0..<260 {
+    if index > 0 { entries += "," }
+    entries += "\"s" + string(index) + "\""
+  }
+  source := `
+readonly TEXTS = [${entries}, ""]
+export function pool(index: int): string => TEXTS[index]
+export function literal(): string => "${literal}"
+`
+  module_ := try! lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  first := try! encodeDoofMinus(module_, true)
+  // A literal's bytes belong in data; startup code must not grow per character.
+  Assert.isTrue(first.length < 1000000, "Large literal and 261 pooled entries must remain compact: " + string(first.length))
+  _ := try! encodeDoofMinus(try! parseDoofMinus("export func answer() -> int\nblock entry\n%value:int = const 42\nreturn %value\nend"))
+  second := try! encodeDoofMinus(module_, true)
+  Assert.arrayEqual(second.cloneReadonly(), first.cloneReadonly(), "Pool state must be local to each encoding call")
+  checkModule(module_, "passive-literal-pool", `
+const expected=('z'.repeat(1024)+'\\0').repeat(256)+'!';
+assert.strictEqual(api.literal(),expected);
+for(let i=0;i<=260;i++)assert.strictEqual(api.pool(i),i===260?'':'s'+i);
+const pointer=instance.exports.pool(0),alias=instance.exports.pool(0);
+assert.strictEqual(pointer,alias,'literal identity remains shared');
+instance.exports.__doof_ffi_release(pointer);instance.exports.__doof_ffi_release(alias);
+for(let i=0;i<5;i++){assert.strictEqual(api.literal(),expected);assert.deepStrictEqual(live(),baseline)}
+const other=await WebAssembly.instantiate(fs.readFileSync(process.argv[1]));
+const otherApi=ffi.createDoofModule(other.instance);
+assert.strictEqual(otherApi.literal(),expected,'passive segments initialize every instance');
+assert.strictEqual(otherApi.pool(259),'s259','all strings precede global initialization');
+`)
+}
+
+export function testReserveAndPopAllWidthsAndResultFailures(): none {
+  types := ["bool", "byte", "char", "int", "long", "float", "double", "Choice"]
+  first := ["false", "byte(7)", "'a'", "7", "7L", "7.0f", "7.0", "Choice.first"]
+  last := ["true", "byte(99)", "'z'", "99", "99L", "99.0f", "99.0", "Choice.last"]
+  capacities := [1024, 1024, 1024, 256, 128, 256, 128, 256]
+  for index of 0..<types.length {
+    checkArrays(`
+enum Choice { first, last }
+export function check(length: int): bool {
+  values: ${types[index]}[] := [${first[index]}]
+  alias := values
+  values.reserve(-1)
+  values.reserve(0)
+  alias.reserve(length + 1)
+  if values.length != 1 || values[0] != ${first[index]} { return false }
+  for i of 0..<length { values.push(${last[index]}) }
+  values.reserve(1)
+  for i of 0..<length {
+    item := try! alias.pop()
+    if item != ${last[index]} || values.length != length - i { return false }
+  }
+  item := try! values.pop()
+  if item != ${first[index]} || alias.length != 0 { return false }
+  failed := values.pop() else message {
+    if message != "Attempted to pop from empty array" { return false }
+    alias.push(${last[index]})
+    return (try! values.pop()) == ${last[index]} && alias.length == 0
+  }
+  return false
+}
+`, "reserve-pop-width-" + string(index), `
+const capacity=${capacities[index]};
+for(const length of [0,1,3,4,5,15,16,17,capacity-1,capacity,capacity+1,2*capacity+1,256*capacity+1]) {
+ assert.strictEqual(api.check(length),true,'length '+length);
+ assert.deepStrictEqual(live(),baseline,'pop/reserve release storage at '+length);
+}
+const end=instance.exports.__doof_debug_heap_end.value;
+assert.strictEqual(api.check(256*capacity+1),true);assert.deepStrictEqual(live(),baseline);
+assert.strictEqual(instance.exports.__doof_debug_heap_end.value,end,'reserved chunks must be reused');
+`)
+  }
+}
+
+export function testReserveAndPopTransferSoleOwnedReferences(): none {
+  types := ["Box", "View", "int[]", "string", "Box | int | string | none"]
+  values := ["Box { value: i }", "Box { value: i }", "[i]", "string(i)", "Box { value: i }"]
+  reads := ["item.value", "item.value", "item[0]", "item.length", "unionValue(item)"]
+  for index of 0..<types.length {
+    checkArrays(`
+interface View { value: int }
+class Box implements View { value: int }
+function unionValue(value: Box | int | string | none): int {
+  case value { box: Box -> { return box.value } _ -> { return -1 } }
+}
+export function check(length: int): bool {
+  values: (${types[index]})[] := []
+  alias := values
+  values.reserve(length + 1)
+  for i of 0..<length { values.push(${values[index]}) }
+  for i of 0..<length {
+    completion := alias.pop()
+    item := try! completion
+    if ${reads[index]} != ${if index == 3 then "string(length - i - 1).length" else "length - i - 1"} { return false }
+  }
+  // Refill at a chunk boundary after popping, exercising existing capacity.
+  for i of 0..<length { values.push(${values[index]}) }
+  return alias.length == length
+}
+export function detached(): string {
+  values: string[] := ["survives"]
+  completion := values.pop()
+  return try! completion
+}
+export function discarded(): none {
+  values := [Box { value: 42 }]
+  _ := values.pop()
+  _ := values.pop()
+}
+`, "reserve-pop-reference-" + string(index), `
+for(const length of [1,4,5,255,256,257,65537]) {
+ assert.strictEqual(api.check(length),true);assert.deepStrictEqual(live(),baseline);
+}
+for(let i=0;i<10;i++){assert.strictEqual(api.detached(),'survives');api.discarded();assert.deepStrictEqual(live(),baseline);}
+`)
+  }
+}
+
+export function testReserveCapacityIsAllocatedAndRawPopTrapsWhenEmpty(): none {
+  module_ := try! parseDoofMinus(`
+export func make() -> int
+block entry
+%zero:int = const 0
+%data:int = array-alloc %zero,int
+return %data
+end
+export func reserve(%data:int,%capacity:int) -> int
+block entry
+%grown:int = array-reserve %data,%capacity,int
+return %grown
+end
+export func push(%data:int,%value:int) -> int
+block entry
+%grown:int = array-push %data,%value
+return %grown
+end
+export func pop(%data:int) -> int
+block entry
+%value:int = array-pop %data
+return %value
+end
+export func length(%data:int) -> int
+block entry
+%length:int = array-length %data
+return %length
+end
+export func drop(%data:int) -> none
+block entry
+array-free %data
+return
+end
+`)
+  checkModule(module_, "reserved-capacity", `
+for(const capacity of [0,1,5,17,256,257,65537]) {
+ let data=api.reserve(api.make(),capacity);assert.strictEqual(api.length(data),0);
+ const end=instance.exports.__doof_debug_heap_end.value;
+ for(let i=0;i<capacity;i++)data=api.push(data,i);
+ assert.strictEqual(instance.exports.__doof_debug_heap_end.value,end,'push must consume reserved capacity');
+ for(let i=capacity-1;i>=0;i--)assert.strictEqual(api.pop(data),i);
+ assert.throws(()=>api.pop(data),WebAssembly.RuntimeError);
+ for(let i=0;i<capacity;i++)data=api.push(data,i);
+ assert.strictEqual(instance.exports.__doof_debug_heap_end.value,end,'pop must preserve reserved chunks');
+ api.drop(data);assert.deepStrictEqual(live(),baseline);
+}
+`)
+}
+
+export function testReadonlyArraysRejectReserveAndPop(): none {
+  for operation of ["reserve(8)", "pop()"] {
+    case lowerDoofWasmSources([SourceFile { path: "/main.do", source: "function main(): none { readonly values: int[] = [1]; values." + operation + " }" }], "/main.do") {
+      failure: Failure<string> -> { Assert.stringContains(failure.error, "not available on readonly array") }
+      _ -> { Assert.fail("Readonly arrays must reject " + operation) }
+    }
+  }
+}

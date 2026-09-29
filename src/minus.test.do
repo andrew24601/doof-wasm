@@ -1,11 +1,176 @@
+import { minusBlocks } from "./minus-control-flow"
 import { Assert } from "std/assert"
 import { BlobReader } from "std/blob"
 import { remove, writeBlob } from "std/fs"
 import { ExecOptions, pid, run } from "std/os"
-import { compileDoofMinus } from "./minus-wasm"
+import { compileDoofMinus, encodeDoofMinus } from "./minus-wasm"
+import { parseDoofMinus } from "./minus-parse"
+import { renderDoofMinus } from "./minus-render"
+import { validateDoofMinus } from "./minus-validate"
+import { MinusImport, MinusInstruction, MinusValue } from "./minus-ir"
 
-function runWasm(source: string, testName: string, script: string): none {
-    bytes := try! compileDoofMinus(source)
+export function testBulkArrayCopyPreservesBitsOverlapBoundsAndChunkTransitions(): none {
+    let source = ""
+    for typeName of ["bool", "byte", "char", "int", "long", "float", "double"] {
+        source += `export func alloc_${typeName}(%length:int) -> int
+block entry
+%data:int = array-alloc %length, ${typeName}
+return %data
+end
+export func read_${typeName}(%data:int, %index:int) -> ${typeName}
+block entry
+%value:${typeName} = array-get %data, %index
+return %value
+end
+export func write_${typeName}(%data:int, %index:int, %value:${typeName}) -> none
+block entry
+array-set %data, %index, %value
+return
+end
+export func copy_${typeName}(%destination:int, %destinationIndex:int, %source:int, %sourceIndex:int, %count:int) -> none
+block entry
+array-copy %destination, %destinationIndex, %source, %sourceIndex, %count, ${typeName}
+return
+end
+export func free_${typeName}(%data:int) -> none
+block entry
+array-free %data, ${typeName}
+return
+end
+`
+    }
+    runWasm(source, "bulk-array-copy", `
+const fs=require('fs'),assert=require('assert');
+const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
+const trap=f=>assert.throws(f,WebAssembly.RuntimeError);
+for(const [type,width] of [['bool',1],['byte',1],['char',1],['int',4],['long',8],['float',4],['double',8]]){
+ const capacity=1024/width,alloc=e['alloc_'+type],read=e['read_'+type],write=e['write_'+type],copy=e['copy_'+type],free=e['free_'+type];
+ const item=i=>type==='bool'?i%2:type==='byte'||type==='char'?i%256:type==='long'?9007199254740993n+BigInt(i):type==='int'?i*7919-10000:i%13===0?-0:i*0.25-100;
+ for(const length of [...new Set([0,1,7,8,9,capacity-1,capacity,capacity+1,capacity*2+17,capacity*256+5])]){
+  const a=alloc(length),b=alloc(length),model=Array.from({length},(_,i)=>item(i));
+  for(let i=0;i<length;i++){write(a,i,model[i]);write(b,i,item(i+99));}
+  copy(b,0,a,0,length);
+  const check=(handle,expected)=>{for(let i=0;i<length;i++)assert(Object.is(read(handle,i),expected[i]),type+' index '+i);};
+  check(b,model);
+  if(length>1){copy(b,1,b,0,length-1);model.copyWithin(1,0,length-1);check(b,model);copy(b,0,b,1,length-1);model.copyWithin(0,1);check(b,model);}
+  if(length>40){copy(b,17,a,3,length-20);for(let i=0;i<length-20;i++)model[i+17]=item(i+3);check(b,model);}
+  copy(b,length,a,length,0);check(b,model);
+  for(const [di,si,count] of [[-1,0,0],[0,-1,0],[length+1,0,0],[0,length+1,0],[0,0,-1],[0,0,2147483647],[length,0,1],[0,length,1],[2147483647,0,1]]){
+   trap(()=>copy(b,di,a,si,count));check(b,model);
+  }
+  trap(()=>copy(b,0,0,0,0));check(b,model);
+  free(a);free(b);
+ }
+}
+const view=new DataView(e.__doof_ffi_memory.buffer);
+for(let p=1024;p<e.__doof_debug_heap_end.value;p+=view.getUint16(p+2,true))assert.strictEqual(view.getUint16(p,true),0);
+`, true)
+}
+
+export function testBulkArrayCopyValidationAndTextRoundTrip(): none {
+    source := `export func copy(%a:int, %b:int, %n:int) -> int
+block entry
+%zero:int = const 0
+array-copy %a, %zero, %b, %zero, %n, byte
+%compared:int = array-compare %a, %b
+return %compared
+end`
+    module_ := try! parseDoofMinus(source)
+    try! validateDoofMinus(module_)
+    rendered := renderDoofMinus(module_)
+    Assert.equal(renderDoofMinus(try! parseDoofMinus(rendered)), rendered)
+    _ := try! encodeDoofMinus(module_)
+    Assert.equal(renderDoofMinus(module_), rendered)
+    for bad of [
+        "array-copy %a, %zero, %b, %zero, %n, any",
+        "array-copy %a, %zero, %b, %zero, %n, none",
+        "array-copy %a, %zero, %b, %zero, %n",
+        "array-copy %a, %zero, %b, %zero, %n, unknown",
+    ] {
+        case validateDoofMinus(try! parseDoofMinus(source.replaceAll("array-copy %a, %zero, %b, %zero, %n, byte", bad))) {
+            failure: Failure<string> -> { Assert.isTrue(failure.error.contains("array-copy")) }
+            _ -> { Assert.fail("invalid bulk array copy must fail") }
+        }
+    }
+}
+
+export function testInstructionValidationRetainsSourcePath(): none {
+    module_ := try! parseDoofMinus(`func check() -> bool
+block entry
+%left:int = const 1
+%right:long = const 1
+%same:bool = eq %left, %right
+return %same
+end
+`)
+    original := minusBlocks(module_.functions[0])[0].instructions[2]
+    minusBlocks(module_.functions[0])[0].instructions[2] = MinusInstruction {
+        op: original.op, args: original.args, result: original.result, line: original.line, sourcePath: "/src/input.do",
+    }
+    case validateDoofMinus(module_) {
+        failure: Failure<string> -> { Assert.equal(failure.error, "/src/input.do: line 5: eq needs matching supported operands") }
+        _ -> { Assert.fail("Invalid source instructions must retain their source location") }
+    }
+}
+
+export function testGlobalInitializersAndTypedReads(): none {
+    source := `global FIRST:long = initialLong
+global SECOND:double = initialDouble
+func initialLong() -> long
+block entry
+%value:long = const 9007199254740993
+return %value
+end
+func initialDouble() -> double
+block entry
+%value:double = const 2.25
+return %value
+end
+export func wide() -> long
+block entry
+%value:long = global-get FIRST
+return %value
+end
+export func decimal() -> double
+block entry
+%value:double = global-get SECOND
+return %value
+end
+`
+    parsed := try! parseDoofMinus(source)
+    Assert.equal(renderDoofMinus(parsed), source)
+    runWasm(source, "globals", `const fs=require('fs'),assert=require('assert');
+WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(({instance})=>{
+assert.strictEqual(instance.exports.wide(),9007199254740993n);assert.strictEqual(instance.exports.decimal(),2.25);
+}).catch(error=>{console.error(error);process.exit(1)});`)
+}
+
+export function testInvalidGlobalDeclarationsAndReads(): none {
+    initializer := `func init() -> int
+block entry
+%value:int = const 42
+return %value
+end
+`
+    rejected("global VALUE:int = missing\n" + initializer, "global initializer must name a private function")
+    rejected("global VALUE:long = init\n" + initializer, "global initializer must name a private function")
+    rejected("global VALUE:none = init\n" + initializer, "global cannot have type none")
+    rejected("global VALUE:int = init\nglobal VALUE:int = init\n" + initializer, "duplicate global")
+    rejected("global VALUE:int = init\nexport " + initializer, "global initializer must name a private function")
+    rejected(`export func read() -> int
+block entry
+%value:int = global-get MISSING
+return %value
+end`, "unknown global MISSING")
+    rejected("global VALUE:int = init\n" + initializer + `export func read() -> long
+block entry
+%value:long = global-get VALUE
+return %value
+end`, "global-get result needs int")
+}
+
+function runWasm(source: string, testName: string, script: string, debugHeap: bool = false): none {
+    bytes := try! compileDoofMinus(source, debugHeap)
     path := "/tmp/doof-minus-" + string(pid()) + "-" + testName + ".wasm"
     try! writeBlob(path, bytes.cloneReadonly())
     result := try! run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
@@ -44,8 +209,10 @@ function capMemoryAtOnePage(bytes: byte[]): byte[] {
     panic("Wasm memory section is missing")
 }
 
-function runCappedWasm(source: string, testName: string, script: string): none {
-    bytes := capMemoryAtOnePage(try! compileDoofMinus(source))
+function runCappedWasm(source: string, testName: string, script: string, imports: MinusImport[] = []): none {
+    module_ := try! parseDoofMinus(source)
+    for import_ of imports { module_.imports.push(import_) }
+    bytes := capMemoryAtOnePage(try! encodeDoofMinus(module_))
     path := "/tmp/doof-minus-" + string(pid()) + "-" + testName + ".wasm"
     try! writeBlob(path, bytes.cloneReadonly())
     result := try! run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
@@ -388,21 +555,168 @@ end
 export function testControlFlowAndConversions(): none {
     runWasm(`
 export func count(%limit:int) -> long
+scope done
+scope loop
 block entry
 %zero:int = const 0
 jump loop(%zero)
+end-scope
+loop loop
+scope step
 block loop(%n:int)
 %again:bool = lt %n, %limit
 branch %again step(%n) done(%n)
+end-scope
 block step(%old:int)
 %one:int = const 1
 %next:int = add %old, %one
 jump loop(%next)
+end-loop
+end-scope
 block done(%answer:int)
 %wide:long = convert %answer
 return %wide
 end
 `, "flow", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.count(0)!==0n||e.count(10000)!==10000n)process.exit(1)`)
+}
+
+export function testDispatchPreservesParallelReferenceTransfers(): none {
+    runCappedWasm(`class Box
+field value:int
+end
+export func rotate(%turns:int) -> int
+scope done
+scope cycle
+block entry
+%one:int = const 1
+%two:int = const 2
+%first:Box = new Box(%one)
+%second:Box = new Box(%two)
+jump cycle(%first, %second, %first, %turns)
+end-scope
+loop cycle
+block cycle(%left:Box, %right:Box, %anchor:Box, %remaining:int)
+%zero:int = const 0
+%increment:int = const 1
+%next:int = sub %remaining, %increment
+%again:bool = lt %zero, %remaining
+branch %again cycle(%right, %left, %anchor, %next) done(%left, %anchor)
+end-loop
+end-scope
+block done(%winner:Box, %kept:Box)
+%answer:int = get %winner.value
+%original:int = get %kept.value
+%sum:int = add %answer, %original
+return %sum
+end`, "parallel-reference-edges", `
+const fs=require('fs'),assert=require('assert');
+const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
+for(let repeat=0;repeat<1000;repeat++) {
+ assert.strictEqual(e.rotate(0),2);assert.strictEqual(e.rotate(1),3);assert.strictEqual(e.rotate(20),2);
+}
+const view=new DataView(e.__doof_ffi_memory.buffer);
+for(let address=1024;address<1100;address+=24)assert.strictEqual(view.getUint16(address,true),0,'reference frame released');
+`)
+}
+
+export function testArrayHelpersKeepRepeatedOperationsCompact(): none {
+    let source = "export func arrays() -> int\nblock entry\n%length:int = const 257\n%index:int = const 256\n%value:int = const 42\n"
+    for index of 0..<100 {
+        source += "%data" + string(index) + ":int = array-alloc %length, int\narray-set %data" + string(index) + ", %index, %value\n"
+        source += "%read" + string(index) + ":int = array-get %data" + string(index) + ", %index\narray-free %data" + string(index) + "\n"
+    }
+    source += "return %read99\nend\n"
+    bytes := try! compileDoofMinus(source)
+    Assert.isTrue(bytes.length < 10000, "Array machinery must be shared across repeated operations")
+    runCappedWasm(source, "compact-array-helpers", `
+const fs=require('fs'),assert=require('assert');
+const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
+for(let repeat=0;repeat<100;repeat++)assert.strictEqual(e.arrays(),42);
+`)
+}
+
+export function testUnusedBlockArgumentsKeepObservableDestructorOrder(): none {
+    runCappedWasm(`class Owner
+field value:int
+destructor Owner.destroy
+end
+func Owner.destroy(%self:Owner) -> none
+block entry
+%value:int = get %self.value
+%effect:none = call record(%value)
+return
+end
+export func order() -> none
+scope done
+block entry
+%one:int = const 1
+%two:int = const 2
+%first:Owner = new Owner(%one)
+%second:Owner = new Owner(%two)
+jump done(%first, %one)
+end-scope
+block done(%unused:Owner, %discarded:int)
+return
+end`, "dead-arguments-destructor-order", `
+const fs=require('fs'),assert=require('assert'),events=[];
+const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1])),{doof:{record:value=>events.push(value)}}).exports;
+for(let repeat=0;repeat<100;repeat++) {
+ e.order();assert.deepStrictEqual(events,[2,1],'unused ownership copy preserves observable destruction order');events.length=0;
+}
+const view=new DataView(e.__doof_ffi_memory.buffer);
+assert.strictEqual(view.getUint16(1024,true),0);assert.strictEqual(view.getUint16(1048,true),0);
+`, [MinusImport { name: "record", importName: "record", params: [MinusValue { name: "%value", typeName: "int" }], result: "none" }])
+}
+
+export function testHundredsOfUnusedBlockArgumentsEmitNoTransfers(): none {
+    let params = ""
+    let args = ""
+    for index of 0..<300 {
+        separator := if index == 0 then "" else ", "
+        params += separator + "%unused" + string(index) + ":long"
+        args += separator + "%wide"
+    }
+    source := "export func answer(%value:int) -> int\nscope done\nblock entry\n%wide:long = const 9007199254740993\njump done(" + args + ")\nend-scope\nblock done(" + params + ")\nreturn %value\nend\n"
+    Assert.isTrue((try! compileDoofMinus(source)).length < 1000, "Dead arguments should allocate no locals or transfer code")
+    runWasm(source, "dead-arguments-compact", `
+const fs=require('fs'),assert=require('assert');
+const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
+assert.strictEqual(e.answer(42),42);assert.strictEqual(e.answer(-7),-7);
+`)
+}
+
+export function testDeadReferenceForwardingCycleExecutesAndReleases(): none {
+    runCappedWasm(`class Box
+field value:int
+end
+export func cycle(%turns:int) -> int
+scope done
+scope loop
+block entry
+%value:int = const 40
+%object:Box = new Box(%value)
+jump loop(%object, %turns)
+end-scope
+loop loop
+block loop(%unused:Box, %remaining:int)
+%zero:int = const 0
+%one:int = const 1
+%next:int = sub %remaining, %one
+%again:bool = lt %zero, %remaining
+branch %again loop(%unused, %next) done()
+end-loop
+end-scope
+block done
+%answer:int = const 42
+return %answer
+end`, "dead-reference-cycle", `
+const fs=require('fs'),assert=require('assert');
+const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
+for(let repeat=0;repeat<100;repeat++) {
+ assert.strictEqual(e.cycle(0),42);assert.strictEqual(e.cycle(1000),42);
+ assert.strictEqual(new DataView(e.__doof_ffi_memory.buffer).getUint16(1024,true),0,'entry allocation is released exactly once');
+}
+`)
 }
 
 export function testPrimitiveHostBoundary(): none {
@@ -470,6 +784,8 @@ block entry
 return %v
 end
 export func run() -> int
+scope yes
+scope no
 block entry
 %a:int = const 7
 %box:Box = new Box(%a)
@@ -480,13 +796,15 @@ set %i.value = %v
 %x:any = box %box
 %ok:bool = is %x Box
 branch %ok yes(%x) no()
+end-scope
+block no()
+%z:int = const 0
+return %z
+end-scope
 block yes(%bx:any)
 %other:Box = cast %bx Box
 %r:int = get %other.value
 return %r
-block no()
-%z:int = const 0
-return %z
 end
 `, "objects", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;for(let i=0;i<100000;i++)if(e.run()!==7)process.exit(1)`)
 }
@@ -525,6 +843,9 @@ block entry
 return %value
 end
 export func choose(%flag:bool) -> int
+scope joined
+scope left
+scope right
 block entry
 %one:int = const 1
 %two:int = const 2
@@ -533,15 +854,85 @@ block entry
 %a:Readable = as %first
 %b:Readable = as %second
 branch %flag left(%a) right(%b)
-block left(%left:Readable)
-jump joined(%left)
+end-scope
 block right(%right:Readable)
 jump joined(%right)
+end-scope
+block left(%left:Readable)
+jump joined(%left)
+end-scope
 block joined(%item:Readable)
 %value:int = call %item.get()
 return %value
 end
 `, "dispatch", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.choose(1)!==1||e.choose(0)!==2)process.exit(1)`)
+}
+
+export function testSharedReleaseDispatchHandlesHolesAndWideLabelDepths(): none {
+    let source = "class Scalar\nfield value:int\nend\n"
+    // Two tags per cleanup shape, and more than 127 distinct label depths.
+    for index of 0..<140 {
+        for suffix of ["A", "B"] {
+            source += "class C" + string(index) + suffix + "\n"
+            for field of 0..<index { source += "field p" + string(field) + ":int\n" }
+            source += "field child:any\nend\n"
+        }
+        source += "class Hole" + string(index) + "\nfield value:int\nend\n"
+    }
+    source += "export func run() -> none\nblock entry\nreturn\nend\n"
+    runWasm(source, "shared-release-dispatch", `
+const fs=require('fs'),assert=require('assert');
+const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
+const alloc=e.__doof_ffi_alloc,release=e.__doof_ffi_release;
+const view=()=>new DataView(e.__doof_ffi_memory.buffer);
+release(0);
+for(let round=0;round<2;round++) {
+ for(let i=0;i<140;i++) {
+  for(let duplicate=0;duplicate<2;duplicate++) {
+   const size=24+Math.max(0,Math.ceil((12+4*i-24)/16))*16;
+   const parent=alloc(size,33+3*i+duplicate),child=alloc(24,31);
+   new Uint8Array(e.__doof_ffi_memory.buffer,parent+8,size-8).fill(0);
+   view().setUint32(parent+8+4*i,child,true);
+   view().setUint32(parent+4,2,true);
+   release(parent);
+   assert.strictEqual(view().getUint32(parent+4,true),1);
+   assert.strictEqual(view().getUint16(child,true),31);
+   release(parent);
+   assert.strictEqual(view().getUint16(parent,true),0);
+   assert.strictEqual(view().getUint16(child,true),0);
+  }
+  const hole=alloc(24,35+3*i);release(hole);
+  assert.strictEqual(view().getUint16(hole,true),0);
+ }
+ const scalar=alloc(24,32);release(scalar);
+ assert.strictEqual(view().getUint16(scalar,true),0);
+}
+for(let p=1024;p<e.__doof_debug_heap_end.value;p+=view().getUint16(p+2,true))assert.strictEqual(view().getUint16(p,true),0);
+`, true)
+}
+
+export function testSharedReleaseDispatchPreservesFinalizersAndFieldOrder(): none {
+    let source = ""
+    for index of 0..<4 {
+        name := "C" + string(index)
+        source += "class " + name + "\nfield first:any\nfield second:any\ndestructor " + name + ".destroy\nend\n"
+        source += "func " + name + ".destroy(%self:" + name + ") -> none\nblock entry\n"
+        source += "%id:int = const " + string(index) + "\n%effect:none = call record(%id)\nreturn\nend\n"
+    }
+    source += "export func run() -> none\nblock entry\nreturn\nend\n"
+    runCappedWasm(source, "shared-release-finalizers", `
+const fs=require('fs'),assert=require('assert'),events=[];
+const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1])),{doof:{record:id=>events.push(id)}}).exports;
+const v=new DataView(e.__doof_ffi_memory.buffer);
+const make=id=>{const p=e.__doof_ffi_alloc(24,32+id);v.setUint32(p+8,0,true);v.setUint32(p+12,0,true);return p;};
+for(let round=0;round<100;round++)for(let id=0;id<4;id++) {
+ const parent=make(id),first=make((id+1)%4),second=make((id+2)%4);
+ v.setUint32(parent+8,first,true);v.setUint32(parent+12,second,true);
+ e.__doof_ffi_release(parent);
+ assert.deepStrictEqual(events,[id,(id+1)%4,(id+2)%4]);events.length=0;
+ for(const p of [parent,first,second])assert.strictEqual(v.getUint16(p,true),0);
+}
+`, [MinusImport { name: "record", importName: "record", params: [MinusValue { name: "%value", typeName: "int" }], result: "none" }])
 }
 
 export function testHeapGrowthAndRelease(): none {
@@ -550,20 +941,28 @@ class Node
 field next:any
 end
 export func makeChain(%limit:int) -> int
+scope done
+scope loop
 block entry
 %empty:none = const none
 %head:any = box %empty
 %zero:int = const 0
 jump loop(%zero,%head)
+end-scope
+loop loop
+scope step
 block loop(%i:int,%chain:any)
 %more:bool = lt %i,%limit
 branch %more step(%i,%chain) done(%i,%chain)
+end-scope
 block step(%old:int,%previous:any)
 %node:Node = new Node(%previous)
 %boxed:any = box %node
 %one:int = const 1
 %next:int = add %old,%one
 jump loop(%next,%boxed)
+end-loop
+end-scope
 block done(%answer:int,%last:any)
 return %answer
 end
@@ -641,6 +1040,8 @@ field let value:double
 field absent:none
 end
 export func run() -> double
+scope yes
+scope no
 block entry
 %empty:none = const none
 %box:any = box %empty
@@ -651,11 +1052,13 @@ block entry
 set %sample.value = %new
 %read:double = get %sample.value
 branch %isNone yes(%read) no()
-block yes(%answer:double)
-return %answer
+end-scope
 block no()
 %zero:double = const 0.0
 return %zero
+end-scope
+block yes(%answer:double)
+return %answer
 end
 `, "floating-fields", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.run()!==2.25)process.exit(1)`)
 }
@@ -672,6 +1075,8 @@ field let unit:none
 field let boxed:any
 end
 export func run() -> int
+scope bad
+scope good
 block entry
 %small:byte = const 1
 %negative:int = const -1
@@ -710,11 +1115,13 @@ set %packed.boxed = %box
 %sum3:int = add %sum2,%di
 %sum4:int = add %sum3,%contained
 branch %flag bad() good(%sum4)
+end-scope
+block good(%answer:int)
+return %answer
+end-scope
 block bad()
 %bad:int = const 0
 return %bad
-block good(%answer:int)
-return %answer
 end
 `, "packed-fields", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;for(let i=0;i<1000;i++)if(e.run()!==123501)process.exit(1)`)
 }

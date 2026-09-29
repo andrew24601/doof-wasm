@@ -1,5 +1,5 @@
 // Human-readable doof-- rendering for inspecting an already-built model.
-import { MinusBlock, MinusFunction, MinusImport, MinusInstruction, MinusModule, MinusValue } from "./minus-ir"
+import { MinusBlock, MinusFunction, MinusImport, MinusInstruction, MinusModule, MinusRegion, MinusValue } from "./minus-ir"
 
 function joined(values: string[], start: int = 0, stop: int = -1): string {
   let end = if stop < 0 then values.length else stop
@@ -49,18 +49,28 @@ function renderInstruction(instruction: MinusInstruction): string {
   if op == "jump" { return "jump " + target(args[0], args, 1, args.length) }
   if op == "branch" { return renderBranch(args) }
   if op == "return" { return "return" + (if args.length == 0 then "" else " " + args[0]) }
-  if op == "panic" { return "panic" }
+  if op == "panic" { return "panic" + (if args.length == 0 then "" else " " + args[0]) }
   return prefix + op + " " + joined(args)
+}
+
+function renderRegion(region: MinusRegion): string {
+  if region.code != none {
+    block_ := region.code!
+    let output = "block " + block_.name + blockParameters(block_) + "\n"
+    for instruction of block_.instructions { output += renderInstruction(instruction) + "\n" }
+    return output
+  }
+  let output = if region.kind == "sequence" then "" else region.kind + " " + region.label + "\n"
+  for child of region.children { output += renderRegion(child) }
+  if region.kind != "sequence" { output += "end-" + region.kind + "\n" }
+  return output
 }
 
 function renderFunction(function_: MinusFunction): string {
   let params: string[] = []
   for parameter of function_.params { params.push(valueDeclaration(parameter)) }
-  let output = (if function_.exported then "export " else "") + "func " + function_.name + "(" + joined(params) + ") -> " + function_.result + "\n"
-  for block of function_.blocks {
-    output += "block " + block.name + blockParameters(block) + "\n"
-    for instruction of block.instructions { output += renderInstruction(instruction) + "\n" }
-  }
+  let output = (if function_.exported then "export " else "") + (if function_.capturePanics then "capture " else "") + "func " + function_.name + "(" + joined(params) + ") -> " + function_.result + "\n"
+  output += renderRegion(function_.body)
   return output + "end\n"
 }
 
@@ -72,7 +82,7 @@ function renderImport(import_: MinusImport): string {
 
 /** Render a MinusModule as readable doof-- text for debugging or snapshots. */
 export function renderDoofMinus(module_: MinusModule): string {
-  let output = ""
+  let output = if module_.recoverPanics then "recover_panics\n" else ""
   for class_ of module_.classes {
     output += "class " + class_.name
     if class_.interfaces.length > 0 { output += " implements " + joined(class_.interfaces) }
@@ -95,6 +105,7 @@ export function renderDoofMinus(module_: MinusModule): string {
   }
   for enum_ of module_.enums { output += "enum " + enum_.name + "\nend\n" }
   for import_ of module_.imports { output += renderImport(import_) }
+  for global_ of module_.globals { output += "global " + global_.name + ":" + global_.typeName + " = " + global_.initializer + "\n" }
   for function_ of module_.functions { output += renderFunction(function_) }
   return output
 }

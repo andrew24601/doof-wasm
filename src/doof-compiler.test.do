@@ -1,9 +1,10 @@
+import { minusBlocks } from "./minus-control-flow"
 import { Assert } from "std/assert"
 import { BlobReader } from "std/blob"
 import { remove, writeBlob, writeText } from "std/fs"
 import { ExecOptions, pid, run } from "std/os"
-import { SourceFile } from "doof/src/semantic"
-import { compileDoofWasmSources, lowerDoofWasmSources } from "./doof-compiler"
+import { SourceFile, Diagnostic, SemanticLocation, SemanticSpan } from "doof/src/semantic"
+import { compileDoofWasmSources, compileDoofWasmSourcesWithBindings, lowerDoofWasmSources } from "./doof-compiler"
 import { MinusModule } from "./minus-ir"
 import { encodeDoofMinus } from "./minus-wasm"
 import { renderDoofJs } from "./minus-js"
@@ -85,8 +86,8 @@ export function testLowersImportedModulesAndDisambiguatesNames(): none {
       Assert.equal(success.value.functions[3].exported || success.value.functions[4].exported, false)
       Assert.equal(success.value.functions[0].sourcePath, "/main.do")
       Assert.equal(success.value.functions[3].sourcePath, "/one.do")
-      Assert.equal(success.value.functions[2].blocks[0].instructions[0].sourcePath, "/main.do")
-      Assert.equal(success.value.functions[2].blocks[0].instructions[0].line, 5)
+      Assert.equal(minusBlocks(success.value.functions[2])[0].instructions[0].sourcePath, "/main.do")
+      Assert.equal(minusBlocks(success.value.functions[2])[0].instructions[0].line, 5)
       Assert.equal(success.value.classes.length, 2)
       Assert.equal(success.value.classes[0].name == success.value.classes[1].name, false)
       Assert.equal(success.value.functions[0].params[0].typeName == success.value.classes[0].name, true)
@@ -180,7 +181,7 @@ export function testLowersMutableClosureCapture(): none {
       let foundCellRead = false
       let foundCellWrite = false
       for function_ of success.value.functions {
-        for block of function_.blocks {
+        for block of minusBlocks(function_) {
           for instruction of block.instructions {
             if instruction.op == "box" && instruction.args.length == 2 { foundCell = true }
             if instruction.op == "get" && instruction.args.length == 2 && instruction.args[1] == "value" { foundCellRead = true }
@@ -209,7 +210,7 @@ export function testLowersImportedIntegerEnums(): none {
       let found = false
       for function_ of success.value.functions {
         if function_.sourcePath == "/kinds.do" {
-          for block of function_.blocks {
+          for block of minusBlocks(function_) {
             for instruction of block.instructions {
               if instruction.op == "const" && instruction.args[0] == "9" { found = true }
             }
@@ -235,7 +236,7 @@ export function testLowersByteArrayToOnDemandWrapperAndTypedOperations(): none {
       let sawMethodSet = false
       let sawMethodGet = false
       let sawMethodLength = false
-      for instruction of success.value.functions[0].blocks[0].instructions {
+      for instruction of minusBlocks(success.value.functions[0])[0].instructions {
         if instruction.op == "array-alloc" { sawAlloc = true }
         if instruction.op == "call-method" && instruction.args.length > 1 && instruction.args[1] == "set" { sawMethodSet = true }
         if instruction.op == "call-method" && instruction.args.length > 1 && instruction.args[1] == "get" { sawMethodGet = true }
@@ -247,7 +248,7 @@ export function testLowersByteArrayToOnDemandWrapperAndTypedOperations(): none {
       Assert.isTrue(sawMethodLength)
       let wrapperUsesOps = false
       for function_ of success.value.functions {
-        if function_.name == "__doof_array_byte.get" { for instruction of function_.blocks[0].instructions { if instruction.op == "array-get" { wrapperUsesOps = true } } }
+        if function_.name == "__doof_array_byte.get" { for instruction of minusBlocks(function_)[0].instructions { if instruction.op == "array-get" { wrapperUsesOps = true } } }
       }
       Assert.isTrue(wrapperUsesOps)
     }
@@ -451,4 +452,41 @@ export function main(): int {
 
 ` }], "/main.do")
   runWasm(bytes, "optional-array-owner", `const e=new WebAssembly.Instance(new WebAssembly.Module(require('fs').readFileSync(process.argv[1]))).exports;require('assert').strictEqual(e.main(),9);`)
+}
+
+export function testSourceCompilationArtifactsShareOneLoadedGraph(): none {
+  let loads = 0
+  loader := (path: string): Result<SourceFile | none, Diagnostic> => {
+    loads += 1
+    if path == "/answer.do" { return Success(SourceFile { path, source: "export function answer(): int => 42" }) }
+    return Success(none)
+  }
+  source := "import { answer } from \"./answer\"\nexport function check(): int => answer()"
+  sources := [SourceFile { path: "/main.do", source }]
+  artifacts := try! compileDoofWasmSourcesWithBindings(sources, "/main.do", loader, true)
+  Assert.equal(loads, 1)
+  expected := try! lowerDoofWasmSources(sources, "/main.do", loader)
+  expectedBytes := try! encodeDoofMinus(expected, true)
+  Assert.arrayEqual(artifacts.bytes.cloneReadonly(), expectedBytes.cloneReadonly())
+  Assert.equal(artifacts.bindings, renderDoofJs(expected, true))
+  runWasm(artifacts.bytes, "artifacts", `
+const fs=require('fs'),assert=require('assert');
+WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(({instance})=>assert.strictEqual(instance.exports.check(),42)).catch(error=>{console.error(error);process.exit(1)});
+`)
+}
+
+export function testSourceCompilationArtifactsKeepLoaderAndSemanticDiagnostics(): none {
+  location := SemanticLocation { line: 0, column: 0, offset: 0 }
+  loader := (path: string): Result<SourceFile | none, Diagnostic> => Failure(Diagnostic {
+    severity: "error", message: "caller source unavailable", module: path,
+    span: SemanticSpan { start: location, end: location },
+  })
+  case compileDoofWasmSourcesWithBindings([SourceFile { path: "/main.do", source: "import { answer } from \"./answer\"\nexport function check(): int => answer()" }], "/main.do", loader) {
+    failure: Failure<string> -> { Assert.stringContains(failure.error, "caller source unavailable") }
+    _ -> { Assert.fail("Loader failures must produce diagnostics") }
+  }
+  case compileDoofWasmSourcesWithBindings([SourceFile { path: "/main.do", source: "export function check(): int => missing" }], "/main.do") {
+    failure: Failure<string> -> { Assert.stringContains(failure.error, "/main.do:1:"); Assert.stringContains(failure.error, "missing") }
+    _ -> { Assert.fail("Semantic failures must produce diagnostics") }
+  }
 }

@@ -1,13 +1,16 @@
+import { createMinusFunction } from "./minus-build"
+import { minusBlocks } from "./minus-control-flow"
 // Synthesized string construction used by compiler diagnostics and source tokenization.
 import { STRING_CLASS, CHAR_ARRAY_CLASS, arrayClassName } from "./doof-lowering-constants"
 import { MinusModule, MinusFunction, MinusBlock, MinusValue, MinusInstruction } from "./minus-ir"
+import { MinusValues, minusValues, minusValueId, minusOperandPositions } from "./minus-analysis"
 
 function value(name: string, typeName: string): MinusValue => MinusValue { name, typeName }
 function instruction(op: string, args: string[], name: string = "", typeName: string = "none"): MinusInstruction => MinusInstruction { op, args, result: if name == "" then none else value(name, typeName) }
 
 function uses(module_: MinusModule, target: string): bool {
   for fn of module_.functions {
-    for block of fn.blocks {
+    for block of minusBlocks(fn) {
       for instruction_ of block.instructions {
         if instruction_.op == "call" && instruction_.args[0] == target { return true }
         if instruction_.op == "call-method" && instruction_.args[1] == target { return true }
@@ -19,57 +22,45 @@ function uses(module_: MinusModule, target: string): bool {
 
 export function injectStringConstruction(module_: MinusModule): none {
   if uses(module_, "concat") {
-    module_.functions.push(MinusFunction {
+    module_.functions.push(createMinusFunction{
       name: STRING_CLASS + ".concat", params: [value("%self", STRING_CLASS), value("%other", STRING_CLASS)], result: STRING_CLASS,
       blocks: [
-      MinusBlock { name: "entry", params: [], instructions: [
-        instruction("call-method", ["%self", "length"], "%left", "int"),
-        instruction("call-method", ["%other", "length"], "%right", "int"),
-        instruction("add", ["%left", "%right"], "%total", "int"),
-        instruction("const", ["0"], "%zero", "int"),
-        instruction("lt", ["%total", "%zero"], "%overflow", "bool"),
-        instruction("branch", ["%overflow", "overflow", "|", "allocate", "%left", "%right", "%total", "%zero"])
-      ] },
-      MinusBlock { name: "overflow", params: [], instructions: [
-        instruction("panic", [])
-      ] },
-      MinusBlock { name: "allocate", params: [value("%left_allocate", "int"), value("%right_allocate", "int"), value("%total_allocate", "int"), value("%zero_allocate", "int")], instructions: [
-        instruction("array-alloc", ["%total_allocate", "char"], "%data", "int"),
-        instruction("jump", ["left", "%zero_allocate", "%data", "%left_allocate", "%right_allocate", "%zero_allocate"])
-      ] },
-      MinusBlock { name: "left", params: [value("%i", "int"), value("%data_left", "int"), value("%left_left", "int"), value("%right_left", "int"), value("%zero_left", "int")], instructions: [
-        instruction("lt", ["%i", "%left_left"], "%more", "bool"),
-        instruction("branch", ["%more", "copyLeft", "%i", "%data_left", "%left_left", "%right_left", "%zero_left", "|", "right", "%zero_left", "%data_left", "%left_left", "%right_left"])
-      ] },
-      MinusBlock { name: "copyLeft", params: [value("%li", "int"), value("%data_copyLeft", "int"), value("%left_copyLeft", "int"), value("%right_copyLeft", "int"), value("%zero_copyLeft", "int")], instructions: [
-        instruction("call-method", ["%self", "get", "%li"], "%lc", "char"),
-        instruction("array-set", ["%data_copyLeft", "%li", "%lc"]),
-        instruction("const", ["1"], "%oneL", "int"),
-        instruction("add", ["%li", "%oneL"], "%ln", "int"),
-        instruction("jump", ["left", "%ln", "%data_copyLeft", "%left_copyLeft", "%right_copyLeft", "%zero_copyLeft"])
-      ] },
-      MinusBlock { name: "right", params: [value("%j", "int"), value("%data_right", "int"), value("%left_right", "int"), value("%right_right", "int")], instructions: [
-        instruction("lt", ["%j", "%right_right"], "%moreR", "bool"),
-        instruction("branch", ["%moreR", "copyRight", "%j", "%data_right", "%left_right", "%right_right", "|", "finish", "%data_right"])
-      ] },
-      MinusBlock { name: "copyRight", params: [value("%rj", "int"), value("%data_copyRight", "int"), value("%left_copyRight", "int"), value("%right_copyRight", "int")], instructions: [
-        instruction("call-method", ["%other", "get", "%rj"], "%rc", "char"),
-        instruction("add", ["%left_copyRight", "%rj"], "%at", "int"),
-        instruction("array-set", ["%data_copyRight", "%at", "%rc"]),
-        instruction("const", ["1"], "%oneR", "int"),
-        instruction("add", ["%rj", "%oneR"], "%rn", "int"),
-        instruction("jump", ["right", "%rn", "%data_copyRight", "%left_copyRight", "%right_copyRight"])
-      ] },
-      MinusBlock { name: "finish", params: [value("%data_finish", "int")], instructions: [
-        instruction("new", [CHAR_ARRAY_CLASS, "%data_finish"], "%chars", CHAR_ARRAY_CLASS),
-        instruction("new", [STRING_CLASS, "%chars"], "%answer", STRING_CLASS),
-        instruction("return", ["%answer"])
-      ] }
+        MinusBlock { name: "entry", instructions: [
+          instruction("get", ["%self", "chars"], "%leftChars", CHAR_ARRAY_CLASS),
+          instruction("get", ["%other", "chars"], "%rightChars", CHAR_ARRAY_CLASS),
+          instruction("get", ["%leftChars", "data"], "%leftData", "int"),
+          instruction("get", ["%rightChars", "data"], "%rightData", "int"),
+          instruction("array-length", ["%leftData"], "%left", "int"),
+          instruction("array-length", ["%rightData"], "%right", "int"),
+          instruction("const", ["0"], "%zero", "int"),
+          instruction("eq", ["%left", "%zero"], "%leftEmpty", "bool"),
+          instruction("branch", ["%leftEmpty", "other", "|", "rightCheck"]),
+        ] },
+        MinusBlock { name: "other", instructions: [instruction("return", ["%other"])] },
+        MinusBlock { name: "rightCheck", instructions: [
+          instruction("eq", ["%right", "%zero"], "%rightEmpty", "bool"),
+          instruction("branch", ["%rightEmpty", "self", "|", "size"]),
+        ] },
+        MinusBlock { name: "self", instructions: [instruction("return", ["%self"])] },
+        MinusBlock { name: "size", instructions: [
+          instruction("add", ["%left", "%right"], "%total", "int"),
+          instruction("lt", ["%total", "%zero"], "%overflow", "bool"),
+          instruction("branch", ["%overflow", "overflow", "|", "allocate"]),
+        ] },
+        MinusBlock { name: "overflow", instructions: [instruction("panic", [])] },
+        MinusBlock { name: "allocate", instructions: [
+          instruction("array-alloc", ["%total", "char"], "%data", "int"),
+          instruction("array-copy", ["%data", "%zero", "%leftData", "%zero", "%left", "char"]),
+          instruction("array-copy", ["%data", "%left", "%rightData", "%zero", "%right", "char"]),
+          instruction("new", [CHAR_ARRAY_CLASS, "%data"], "%chars", CHAR_ARRAY_CLASS),
+          instruction("new", [STRING_CLASS, "%chars"], "%answer", STRING_CLASS),
+          instruction("return", ["%answer"]),
+        ] },
       ],
     })
   }
   if uses(module_, "split") {
-    module_.functions.push(MinusFunction {
+    module_.functions.push(createMinusFunction{
       name: STRING_CLASS + ".split", params: [value("%self", STRING_CLASS), value("%separator", STRING_CLASS)], result: arrayClassName(STRING_CLASS),
       blocks: [
       MinusBlock { name: "entry", params: [], instructions: [
@@ -134,7 +125,7 @@ export function injectStringConstruction(module_: MinusModule): none {
     })
   }
   if uses(module_, "__doof_format_long") {
-    module_.functions.push(MinusFunction {
+    module_.functions.push(createMinusFunction{
       name: "__doof_format_long", params: [value("%input", "long")], result: STRING_CLASS,
       blocks: [
       MinusBlock { name: "entry", params: [], instructions: [
@@ -196,7 +187,7 @@ export function injectStringConstruction(module_: MinusModule): none {
     })
   }
   if uses(module_, "__doof_format_char") {
-    module_.functions.push(MinusFunction {
+    module_.functions.push(createMinusFunction{
       name: "__doof_format_char", params: [value("%input", "char")], result: STRING_CLASS,
       blocks: [
       MinusBlock { name: "entry", params: [], instructions: [
@@ -211,4 +202,149 @@ export function injectStringConstruction(module_: MinusModule): none {
       ],
     })
   }
+}
+
+// Concatenation chains such as `a + b + c` or an interpolated string lower to
+// nested two-part concats, each allocating and copying a temporary. Merge a
+// concat whose left or right operand is a single-use concat result from the
+// same block, then build all parts with one allocation. Chains longer than
+// MAX_CONCAT_PARTS are split into successive groups.
+readonly MAX_CONCAT_PARTS = 8
+
+export function flattenStringConcats(module_: MinusModule): none {
+  let arities: int[] = []
+  for function_ of module_.functions {
+    if function_.name.startsWith(STRING_CLASS + ".concat") { continue }
+    table := minusValues(function_)
+    let uses: int[] = []
+    for _ of table.values { uses.push(0) }
+    blocks := minusBlocks(function_)
+    for block_ of blocks {
+      for instruction_ of block_.instructions {
+        for operand of minusOperandPositions(instruction_) { uses[minusValueId(table, instruction_.args[operand])] += 1 }
+      }
+    }
+    for block_ of blocks { flattenBlock(block_, table, uses, arities) }
+  }
+  for arity of arities { module_.functions.push(concatFunction(arity)) }
+}
+
+function flattenBlock(block_: MinusBlock, table: MinusValues, uses: int[], arities: int[]): none {
+  let concats: int[] = []
+  let any = false
+  for index of 0..<block_.instructions.length {
+    instruction_ := block_.instructions[index]
+    isConcat := instruction_.op == "call-method" && instruction_.args.length == 3 && instruction_.args[1] == "concat"
+      && instruction_.result != none && instruction_.result!.typeName == STRING_CLASS
+      && table.values[minusValueId(table, instruction_.args[0])].typeName == STRING_CLASS
+      && table.values[minusValueId(table, instruction_.args[2])].typeName == STRING_CLASS
+    concats.push(if isConcat then 1 else 0)
+    if isConcat { any = true }
+  }
+  if !any { return }
+  // parts[i]: operand names for concat i; absorbed[i]: merged into a later one.
+  let parts: string[][] = []
+  let absorbed: bool[] = []
+  let names: string[] = []
+  for index of 0..<block_.instructions.length {
+    parts.push([]); absorbed.push(false)
+    instruction_ := block_.instructions[index]
+    names.push(if instruction_.result != none then instruction_.result!.name else "")
+  }
+  for index of 0..<block_.instructions.length {
+    if concats[index] == 0 { continue }
+    instruction_ := block_.instructions[index]
+    for operand of [instruction_.args[0], instruction_.args[2]] {
+      let source = -1
+      if uses[minusValueId(table, operand)] == 1 {
+        let cursor = index - 1
+        while cursor >= 0 {
+          if names[cursor] == operand { source = cursor; break }
+          cursor -= 1
+        }
+      }
+      if source >= 0 && concats[source] == 1 && !absorbed[source] {
+        absorbed[source] = true
+        for part of parts[source] { parts[index].push(part) }
+      } else { parts[index].push(operand) }
+    }
+  }
+  let rebuilt: MinusInstruction[] = []
+  for index of 0..<block_.instructions.length {
+    instruction_ := block_.instructions[index]
+    if concats[index] == 0 || parts[index].length <= 2 {
+      if !absorbed[index] { rebuilt.push(instruction_) }
+      continue
+    }
+    if absorbed[index] { continue }
+    // Group long chains; each group's result becomes the next group's first part.
+    let pending = parts[index]
+    let group = 0
+    while pending.length > 0 {
+      let take = if pending.length > MAX_CONCAT_PARTS then MAX_CONCAT_PARTS else pending.length
+      let chunk: string[] = []
+      for position of 0..<take { chunk.push(pending[position]) }
+      let rest: string[] = []
+      for position of take..<pending.length { rest.push(pending[position]) }
+      final := rest.length == 0
+      target := if final then instruction_.result!.name else instruction_.result!.name + "_concat" + string(group)
+      if chunk.length == 1 {
+        rebuilt.push(MinusInstruction { op: "copy", result: MinusValue { name: target, typeName: STRING_CLASS }, args: [chunk[0]], line: instruction_.line, sourcePath: instruction_.sourcePath })
+      } else if chunk.length == 2 {
+        rebuilt.push(MinusInstruction { op: "call-method", result: MinusValue { name: target, typeName: STRING_CLASS }, args: [chunk[0], "concat", chunk[1]], line: instruction_.line, sourcePath: instruction_.sourcePath })
+      } else {
+        let args = [chunk[0], "concat" + string(chunk.length)]
+        for position of 1..<chunk.length { args.push(chunk[position]) }
+        rebuilt.push(MinusInstruction { op: "call-method", result: MinusValue { name: target, typeName: STRING_CLASS }, args, line: instruction_.line, sourcePath: instruction_.sourcePath })
+        if !arities.contains(chunk.length) { arities.push(chunk.length) }
+      }
+      if final { break }
+      pending = [target]
+      for part of rest { pending.push(part) }
+      group += 1
+    }
+  }
+  while block_.instructions.length > 0 { _ := try! block_.instructions.pop() }
+  for instruction_ of rebuilt { block_.instructions.push(instruction_) }
+}
+
+// __doof_string.concatN(self, p1, ...): one allocation for all parts.
+function concatFunction(arity: int): MinusFunction {
+  let params = [value("%self", STRING_CLASS)]
+  for index of 1..<arity { params.push(value("%part" + string(index), STRING_CLASS)) }
+  let entry: MinusInstruction[] = [instruction("const", ["0"], "%zero", "int")]
+  let total = "%zero"
+  for index of 0..<arity {
+    name := if index == 0 then "%self" else "%part" + string(index)
+    entry.push(instruction("get", [name, "chars"], "%chars" + string(index), CHAR_ARRAY_CLASS))
+    entry.push(instruction("get", ["%chars" + string(index), "data"], "%data" + string(index), "int"))
+    entry.push(instruction("array-length", ["%data" + string(index)], "%length" + string(index), "int"))
+    entry.push(instruction("add", [total, "%length" + string(index)], "%total" + string(index), "int"))
+    total = "%total" + string(index)
+  }
+  // Each length is non-negative, so a negative running total means overflow.
+  let checks: MinusBlock[] = []
+  entry.push(instruction("lt", ["%total1", "%zero"], "%overflow1", "bool"))
+  entry.push(instruction("branch", ["%overflow1", "overflow", "|", if arity > 2 then "check2" else "allocate"]))
+  for index of 2..<arity {
+    next := if index + 1 < arity then "check" + string(index + 1) else "allocate"
+    checks.push(MinusBlock { name: "check" + string(index), instructions: [
+      instruction("lt", ["%total" + string(index), "%zero"], "%overflow" + string(index), "bool"),
+      instruction("branch", ["%overflow" + string(index), "overflow", "|", next]),
+    ] })
+  }
+  let copies: MinusInstruction[] = [instruction("array-alloc", [total, "char"], "%data", "int")]
+  let offset = "%zero"
+  for index of 0..<arity {
+    copies.push(instruction("array-copy", ["%data", offset, "%data" + string(index), "%zero", "%length" + string(index), "char"]))
+    offset = "%total" + string(index)
+  }
+  copies.push(instruction("new", [CHAR_ARRAY_CLASS, "%data"], "%chars", CHAR_ARRAY_CLASS))
+  copies.push(instruction("new", [STRING_CLASS, "%chars"], "%answer", STRING_CLASS))
+  copies.push(instruction("return", ["%answer"]))
+  let blocks = [MinusBlock { name: "entry", instructions: entry }]
+  for check of checks { blocks.push(check) }
+  blocks.push(MinusBlock { name: "overflow", instructions: [instruction("panic", [])] })
+  blocks.push(MinusBlock { name: "allocate", instructions: copies })
+  return createMinusFunction{ name: STRING_CLASS + ".concat" + string(arity), params, result: STRING_CLASS, blocks }
 }

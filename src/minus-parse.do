@@ -1,4 +1,4 @@
-import { MinusBlock, MinusClass, MinusEnum, MinusField, MinusFunction, MinusInstruction, MinusInterface, MinusMethod, MinusModule, MinusValue } from "./minus-ir"
+import { MinusBlock, MinusClass, MinusEnum, MinusField, MinusFunction, MinusGlobal, MinusInstruction, MinusInterface, MinusMethod, MinusModule, MinusRegion, MinusValue } from "./minus-ir"
 
 function tokens(line: string): string[] {
     let result: string[] = []
@@ -128,6 +128,7 @@ export function parseDoofMinus(source: string): Result<MinusModule, string> {
     let currentEnum: MinusEnum | none = none
     let currentFunction: MinusFunction | none = none
     let currentBlock: MinusBlock | none = none
+    let regions: MinusRegion[] = []
     lines := source.split("\n")
     for offset of 0..<lines.length {
         line := offset + 1
@@ -135,11 +136,23 @@ export function parseDoofMinus(source: string): Result<MinusModule, string> {
         if parts.length == 0 { continue }
         if parts[0] == "end" {
             if parts.length != 1 || (currentClass == none && currentInterface == none && currentEnum == none && currentFunction == none) { return Failure(diagnostic(line, "unexpected end")) }
-            if currentFunction != none && currentFunction!.blocks.length == 0 { return Failure(diagnostic(line, "function needs a block")) }
+            if currentFunction != none && regions.length != 1 { return Failure(diagnostic(line, "unterminated control region")) }
+            if currentFunction != none && currentFunction!.body.children.length == 0 { return Failure(diagnostic(line, "function needs a body")) }
             currentClass = none; currentInterface = none; currentEnum = none; currentFunction = none; currentBlock = none
+            regions = []
             continue
         }
         if currentClass == none && currentInterface == none && currentEnum == none && currentFunction == none {
+            if parts[0] == "global" {
+                if parts.length != 6 || parts[2] != ":" || parts[4] != "=" { return Failure(diagnostic(line, "expected global name:type = initializer")) }
+                module_.globals.push(MinusGlobal { name: parts[1], typeName: parts[3], initializer: parts[5], line })
+                continue
+            }
+            if parts[0] == "recover_panics" {
+                if parts.length != 1 || module_.recoverPanics { return Failure(diagnostic(line, "invalid panic recovery declaration")) }
+                module_.recoverPanics = true
+                continue
+            }
             if parts[0] == "class" {
                 if parts.length < 2 { return Failure(diagnostic(line, "class needs a name")) }
                 let interfaces: string[] = []
@@ -167,6 +180,8 @@ export function parseDoofMinus(source: string): Result<MinusModule, string> {
             let offset_ = 0
             let exported = false
             if parts[0] == "export" { exported = true; offset_ = 1 }
+            let capturePanics = false
+            if parts.length > offset_ && parts[offset_] == "capture" { capturePanics = true; offset_ += 1 }
             if parts.length > offset_ + 3 && parts[offset_] == "func" {
                 let name = parts[offset_ + 1]
                 let paramsStart = offset_ + 2
@@ -177,7 +192,8 @@ export function parseDoofMinus(source: string): Result<MinusModule, string> {
                 try params := parseParams(parts, paramsStart, true, line)
                 endIndex := closeIndex(parts, paramsStart)
                 if endIndex + 2 >= parts.length || parts[endIndex + 1] != "->" || endIndex + 3 != parts.length { return Failure(diagnostic(line, "invalid function signature")) }
-                currentFunction = MinusFunction { name, params, result: parts[endIndex + 2], exported, line }
+                currentFunction = MinusFunction { name, params, result: parts[endIndex + 2], exported, capturePanics, line }
+                regions = [currentFunction!.body]
                 module_.functions.push(currentFunction!)
                 continue
             }
@@ -209,6 +225,21 @@ export function parseDoofMinus(source: string): Result<MinusModule, string> {
             }
             return Failure(diagnostic(line, "invalid type member"))
         }
+        if parts[0] == "scope" || parts[0] == "loop" {
+            if parts.length != 2 { return Failure(diagnostic(line, "control region needs a label")) }
+            region := MinusRegion { kind: parts[0], label: parts[1] }
+            regions[regions.length - 1].children.push(region)
+            regions.push(region)
+            currentBlock = none
+            continue
+        }
+        if parts[0] == "end-scope" || parts[0] == "end-loop" {
+            expected := if parts[0] == "end-scope" then "scope" else "loop"
+            if parts.length != 1 || regions.length < 2 || regions[regions.length - 1].kind != expected { return Failure(diagnostic(line, "mismatched control region end")) }
+            _ := try! regions.pop()
+            currentBlock = none
+            continue
+        }
         if parts[0] == "block" {
             if parts.length < 2 { return Failure(diagnostic(line, "block needs a name")) }
             let params: MinusValue[] = []
@@ -218,7 +249,7 @@ export function parseDoofMinus(source: string): Result<MinusModule, string> {
                 params = parsedParams
             }
             currentBlock = MinusBlock { name: parts[1], params, line }
-            currentFunction!.blocks.push(currentBlock!)
+            regions[regions.length - 1].children.push(MinusRegion { kind: "code", label: parts[1], code: currentBlock! })
             continue
         }
         if currentBlock == none { return Failure(diagnostic(line, "instruction outside block")) }
