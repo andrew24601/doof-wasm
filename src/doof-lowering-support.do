@@ -15,6 +15,9 @@ export class SourceBinding {
   parameter: bool = false
   mutable: bool = false
   boxedTypeName: string = ""
+  // Stable declaration identity for versions carried to an enclosing loop.
+  // Synthesized bindings use unique names and keep the default sentinel.
+  origin: int = -1
 }
 
 export class SourceConstant {
@@ -28,6 +31,16 @@ export class LoopTarget {
   breakName: string
   continueName: string
   locals: SourceBinding[]
+  label: string | none = none
+  parent: LoopTarget | none = none
+  scopeDepth: int = 0
+}
+
+export class YieldTarget {
+  joinName: string
+  typeName: string
+  locals: SourceBinding[]
+  scopeDepth: int = 0
 }
 
 // Owned by one lowering invocation; never retained across compilations.
@@ -43,6 +56,8 @@ export class FunctionLowering {
   constants: SourceConstant[] = []
   expandingConstants: string[] = []
   let loopTarget: LoopTarget | none = none
+  let yieldTarget: YieldTarget | none = none
+  scopedValues: MinusValue[] = []
 
   blocks: MinusBlock[] = []
   let currentBlock: MinusBlock
@@ -133,7 +148,7 @@ export function closureInterfaceName(function_: FunctionType, names: SourceNameC
   return name
 }
 
-export function closureTypeLabel(type_: ResolvedType, names: SourceNameCache | none = none): string {
+function closureTypeLabel(type_: ResolvedType, names: SourceNameCache | none = none): string {
   case type_ {
     primitive: PrimitiveType -> { if primitive.name == "string" { return "string" } }
     _ -> { }
@@ -141,10 +156,13 @@ export function closureTypeLabel(type_: ResolvedType, names: SourceNameCache | n
   return resolvedName(type_, names)
 }
 
-export function supportedUnionMember(type_: ResolvedType, names: SourceNameCache | none = none): bool {
+function supportedUnionMember(type_: ResolvedType, names: SourceNameCache | none = none): bool {
   case type_ {
     primitive: PrimitiveType -> { return ["bool", "char", "byte", "int", "long", "float", "double", "string"].contains(primitive.name) }
     _: ClassType -> { return true }
+    result_: ResultResolvedType -> { return supportedUnionMember(result_.valueType, names) && supportedUnionMember(result_.errorType, names) }
+    success: SuccessResolvedType -> { return supportedUnionMember(success.valueType, names) }
+    failure: FailureResolvedType -> { return supportedUnionMember(failure.errorType, names) }
     _: EnumType -> { return true }
     _: SerialValueResolvedType -> { return true }
     map: MapResolvedType -> { return resolvedName(map, names) != "" }
@@ -186,7 +204,7 @@ export function latestLocals(context: FunctionLowering): SourceBinding[] {
     if binding.parameter || !binding.mutable || names.contains(binding.name) { continue }
     names.push(binding.name)
     current := findBinding(context, binding.name)
-    if current != none { result.push(current!) }
+    if current != none && current!.mutable { result.push(current!) }
   }
   return result
 }
@@ -194,7 +212,10 @@ export function latestLocals(context: FunctionLowering): SourceBinding[] {
 export function bindingValues(context: FunctionLowering, bindings: SourceBinding[]): string[] {
   let result: string[] = []
   for binding of bindings {
-    current := findBinding(context, binding.name)
+    let current: SourceBinding | none = none
+    for candidate of context.bindings {
+      if candidate.name == binding.name && candidate.origin == binding.origin { current = candidate }
+    }
     result.push(if current == none then binding.valueName else current!.valueName)
   }
   return result
@@ -227,11 +248,13 @@ export function blockContext(parent: FunctionLowering, locals: SourceBinding[], 
     valueName := "%b" + string(id) + suffix + string(index)
     storageType := if locals[index].boxedTypeName == "" then locals[index].typeName else locals[index].boxedTypeName
     params.push(MinusValue { name: valueName, typeName: storageType })
-    child.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
+    child.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName, mutable: locals[index].mutable, origin: locals[index].origin, boxedTypeName: locals[index].boxedTypeName })
   }
   for constant of parent.constants { child.constants.push(constant) }
   for name of parent.expandingConstants { child.expandingConstants.push(name) }
   child.loopTarget = parent.loopTarget
+  child.yieldTarget = parent.yieldTarget
+  for value of parent.scopedValues { child.scopedValues.push(value) }
   child.sourcePath = parent.sourcePath
   child.module_ = parent.module_
   child.closureIndex = parent.closureIndex

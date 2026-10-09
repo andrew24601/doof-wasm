@@ -27,11 +27,6 @@ function tokens(line: string): string[] {
 
 function diagnostic(line: int, message: string): string => "line " + string(line) + ": " + message
 
-function nameAt(parts: string[], index: int, line: int): Result<string, string> {
-    if index >= parts.length || parts[index] == "" { return Failure(diagnostic(line, "missing name")) }
-    return Success(parts[index])
-}
-
 function parseParams(parts: string[], start: int, named: bool, line: int): Result<MinusValue[], string> {
     if start >= parts.length || parts[start] != "(" { return Failure(diagnostic(line, "expected (")) }
     let values: MinusValue[] = []
@@ -236,7 +231,7 @@ export function parseDoofMinus(source: string): Result<MinusModule, string> {
         if parts[0] == "end-scope" || parts[0] == "end-loop" {
             expected := if parts[0] == "end-scope" then "scope" else "loop"
             if parts.length != 1 || regions.length < 2 || regions[regions.length - 1].kind != expected { return Failure(diagnostic(line, "mismatched control region end")) }
-            _ := try! regions.pop()
+            _ := regions.pop()!
             currentBlock = none
             continue
         }

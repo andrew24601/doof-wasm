@@ -9,9 +9,10 @@ import {
   ReadonlyDeclaration, ExpressionStatement, IntLiteral, LongLiteral, FloatLiteral, DoubleLiteral, StringLiteral,
   CharLiteral, BoolLiteral, NoneLiteral, Identifier, BinaryExpression, UnaryExpression, AssignmentExpression,
   ObjectProperty, ObjectLiteral, CallExpression, MemberExpression, ConstructExpression, ArrayLiteral, IndexExpression, AsExpression, ThisExpression,
-  DotShorthand, IfStatement, IfBranch, IfExpression, CaseStatement, TypePattern, ValuePattern, WildcardPattern, WhileStatement,
-  ForStatement, ForOfStatement, LambdaExpression, BreakStatement, ContinueStatement, TryStatement, ConstDeclaration, AsyncExpression, YieldStatement,
+  DotShorthand, IfStatement, IfBranch, IfExpression, CaseExpression, CaseStatement, CaseArm, CasePattern, TypePattern, ValuePattern, RangePattern, WildcardPattern, WhileStatement,
+  ForStatement, ForOfStatement, WithStatement, LambdaExpression, BreakStatement, ContinueStatement, TryStatement, ConstDeclaration, AsyncExpression, YieldStatement, YieldBlockExpression, YieldBlockAssignmentStatement,
 } from "doof/src/ast"
+import { AbsenceLayer, absenceLayers, absenceErrorType } from "doof/src/absence-types"
 import { collectNestedExpressions, collectBlockExpressions } from "doof/src/ast-walk"
 import { WasmLoweringOptions } from "./doof-lowering-options"
 import {
@@ -19,10 +20,89 @@ import {
 } from "./minus-ir"
 import { BYTE_ARRAY_CLASS, CHAR_ARRAY_CLASS, STRING_CLASS, STRING_BOOL_MAP_CLASS, RESULT_SUCCESS_CLASS, RESULT_FAILURE_CLASS, arrayClassName, arrayElementFromClassName, isArrayClass } from "./doof-lowering-constants"
 import {
-  SourceBinding, SourceConstant, LoopTarget, FunctionLowering, SourceNameCache, qualifiedName, staticFunctionName, atLine, enumVariantValue, resolvedName, closureInterfaceName,
+  SourceBinding, SourceConstant, LoopTarget, YieldTarget, FunctionLowering, SourceNameCache, qualifiedName, staticFunctionName, atLine, enumVariantValue, resolvedName, closureInterfaceName,
   annotationName, typeFromValue, declarationType, findBinding, latestLocals, bindingValues, result, effect,
   blockContext, concatValues, appendContext, nestedElseIf, functionResultType, registerClosureType,
 } from "./doof-lowering-support"
+
+// Drop scoped roots in reverse order. Edge operands that alias a root need
+// their own snapshot before the root's local is cleared.
+function leaveWithScopes(context: FunctionLowering, depth: int, values: string[]): string[] {
+  let snapshots: string[] = []
+  for value of values {
+    let held: MinusValue | none = none
+    for index of depth..<context.scopedValues.length {
+      if context.scopedValues[index].name == value { held = context.scopedValues[index] }
+    }
+    snapshots.push(if held == none then value else result(context, "copy", [value], held!.typeName))
+  }
+  let index = context.scopedValues.length - 1
+  while index >= depth { effect(context, "drop", [context.scopedValues[index].name]); index -= 1 }
+  return snapshots
+}
+
+function scopedReference(type_: ResolvedType): bool {
+  case type_ {
+    primitive: PrimitiveType -> { return primitive.name == "string" }
+    _: EnumType -> { return false }
+    _: NoneType -> { return false }
+    _ -> { return true }
+  }
+}
+
+function lowerWith(context: FunctionLowering, statement: WithStatement): none {
+  locals := latestLocals(context)
+  id := context.nextBlock
+  context.nextBlock += 1
+  bodyName := "with_body" + string(id)
+  effect(context, "jump", concatValues([bodyName], bindingValues(context, locals)))
+  body := blockContext(context, locals, id, "s", bodyName)
+  depth := body.scopedValues.length
+  for binding of statement.bindings {
+    body.currentLine = binding.span.start.line
+    typeName := declarationType(binding.resolvedType, typeFromValue(binding.value, context.names), context.names)
+    if typeName == "" && binding.value.resolvedType!.kind != "never" { body.failed = "unsupported with binding type"; break }
+    before := body.nextValue
+    beforeBlocks := body.blocks.length
+    let value = lowerExpected(body, binding.value, typeName)
+    if body.failed != "" || body.terminated { break }
+    if scopedReference(if binding.resolvedType == none then binding.value.resolvedType! else binding.resolvedType!) {
+      // Reading an existing binding must not clear its owner's SSA local.
+      let created = false
+      for index of before..<body.nextValue { if value == "%v" + string(index) { created = true } }
+      for index of beforeBlocks..<body.blocks.length {
+        for parameter of body.blocks[index].params { if parameter.name == value { created = true } }
+      }
+      if !created { value = result(body, "copy", [value], typeName) }
+      body.scopedValues.push(MinusValue { name: value, typeName })
+    }
+    if binding.name != "_" { body.bindings.push(SourceBinding { name: binding.name, typeName, valueName: value, origin: binding.span.start.offset }) }
+  }
+  if body.failed == "" && !body.terminated { lowerStatements(body, statement.body.statements) }
+  if body.failed != "" { context.failed = body.failed; return }
+  // Restore the enclosing lexical environment, preserving assignments and
+  // capture cells by declaration identity rather than a shadowed name.
+  let updates: SourceBinding[] = []
+  for outer of context.bindings {
+    let current = outer
+    for candidate of body.bindings {
+      if candidate.name == outer.name && candidate.origin == outer.origin { current = candidate }
+    }
+    updates.push(current)
+  }
+  if !body.terminated {
+    let values: string[] = []
+    for update of updates { values.push(update.valueName) }
+    snapshots := leaveWithScopes(body, depth, values)
+    for index of 0..<updates.length {
+      update := updates[index]
+      updates[index] = SourceBinding { name: update.name, typeName: update.typeName, valueName: snapshots[index], mutable: update.mutable, parameter: update.parameter, origin: update.origin, boxedTypeName: update.boxedTypeName }
+    }
+  }
+  appendContext(context, body)
+  for update of updates { context.bindings.push(update) }
+  context.terminated = body.terminated
+}
 
 function lowerIf(context: FunctionLowering, statement: IfStatement): none {
   condition := lowerExpression(context, statement.condition)
@@ -69,7 +149,7 @@ function lowerIf(context: FunctionLowering, statement: IfStatement): none {
     context.currentBlock = MinusBlock { name: joinName, params: joinParams, sourcePath: context.sourcePath }
     context.blocks.push(context.currentBlock)
     for index of 0..<locals.length {
-      context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
+      context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, origin: locals[index].origin, boxedTypeName: locals[index].boxedTypeName })
     }
     context.terminated = false
   } else {
@@ -94,7 +174,6 @@ function jumpsTo(context: FunctionLowering, target: string): bool {
 }
 
 function lowerWhile(context: FunctionLowering, statement: WhileStatement): none {
-  if statement.label != none { context.failed = "labeled loops are not supported by doof-wasm yet"; return }
   if statement.then_ != none { context.failed = "while-else clauses are not supported by doof-wasm yet"; return }
   locals := latestLocals(context)
   id := context.nextBlock
@@ -115,7 +194,7 @@ function lowerWhile(context: FunctionLowering, statement: WhileStatement): none 
   else { effect(conditionContext, "branch", branchArgs) }
 
   bodyContext := blockContext(conditionContext, locals, id, "w", bodyName)
-  bodyContext.loopTarget = LoopTarget { breakName: exitName, continueName: conditionName, locals }
+  bodyContext.loopTarget = LoopTarget { breakName: exitName, continueName: conditionName, locals, label: statement.label, parent: context.loopTarget, scopeDepth: context.scopedValues.length }
   lowerStatements(bodyContext, statement.body.statements)
   if bodyContext.failed != "" { context.failed = bodyContext.failed; return }
   if !bodyContext.terminated { effect(bodyContext, "jump", concatValues([conditionName], bindingValues(bodyContext, locals))) }
@@ -135,7 +214,6 @@ function lowerWhile(context: FunctionLowering, statement: WhileStatement): none 
 
 // Source loops carry locals through the header, body, update, and exit blocks.
 function lowerFor(context: FunctionLowering, statement: ForStatement): none {
-  if statement.label != none { context.failed = "labeled loops are not supported by doof-wasm yet"; return }
   if statement.then_ != none { context.failed = "for-else clauses are not supported by doof-wasm yet"; return }
   if statement.init != none { lowerStatements(context, [statement.init!]) }
   if context.failed != "" || context.terminated { return }
@@ -159,7 +237,7 @@ function lowerFor(context: FunctionLowering, statement: ForStatement): none {
 
   bodyContext := blockContext(conditionContext, locals, id, "f", bodyName)
   updateName := "for_update" + string(id)
-  bodyContext.loopTarget = LoopTarget { breakName: exitName, continueName: updateName, locals }
+  bodyContext.loopTarget = LoopTarget { breakName: exitName, continueName: updateName, locals, label: statement.label, parent: context.loopTarget, scopeDepth: context.scopedValues.length }
   lowerStatements(bodyContext, statement.body.statements)
   if bodyContext.failed != "" { context.failed = bodyContext.failed; return }
   if !bodyContext.terminated { effect(bodyContext, "jump", concatValues([updateName], bindingValues(bodyContext, locals))) }
@@ -183,7 +261,6 @@ function lowerFor(context: FunctionLowering, statement: ForStatement): none {
 }
 
 function lowerForOf(context: FunctionLowering, statement: ForOfStatement): none {
-  if statement.label != none { context.failed = "labeled loops are not supported by doof-wasm yet"; return }
   if statement.then_ != none { context.failed = "for-of-else clauses are not supported by doof-wasm yet"; return }
   if statement.bindings.length > 1 { context.failed = "for-of destructuring is not supported by doof-wasm yet"; return }
   let isRange = false
@@ -272,7 +349,7 @@ function lowerForOf(context: FunctionLowering, statement: ForOfStatement): none 
     bodyContext.bindings.push(SourceBinding { name: statement.bindings[0], typeName: elementType, valueName: item })
   }
   updateName := "for_of_update" + string(id)
-  bodyContext.loopTarget = LoopTarget { breakName: exitName, continueName: updateName, locals: carried }
+  bodyContext.loopTarget = LoopTarget { breakName: exitName, continueName: updateName, locals: carried, label: statement.label, parent: context.loopTarget, scopeDepth: context.scopedValues.length }
   lowerStatements(bodyContext, statement.body.statements)
   if bodyContext.failed != "" { context.failed = bodyContext.failed; return }
   if !bodyContext.terminated { effect(bodyContext, "jump", concatValues([updateName], bindingValues(bodyContext, carried))) }
@@ -290,7 +367,7 @@ function lowerForOf(context: FunctionLowering, statement: ForOfStatement): none 
   appendContext(context, bodyContext)
   appendContext(context, updateContext)
   appendContext(context, exitContext)
-  while context.bindings.length > originalBindings.length { ignored := try! context.bindings.pop() }
+  while context.bindings.length > originalBindings.length { ignored := context.bindings.pop()! }
   for binding of latestLocals(exitContext) { if binding.name != iterableName && binding.name != cursorName { context.bindings.push(binding) } }
   context.terminated = exitContext.terminated
 }
@@ -334,49 +411,124 @@ function lowerCaseTypeCondition(context: FunctionLowering, subject: string, targ
   return matched
 }
 
-function lowerCaseStatement(context: FunctionLowering, statement: CaseStatement): none {
-  if typeFromValue(statement.subject, context.names) != "any" {
-    context.failed = "case statements currently require an any-backed union subject"
-    return
+function lowerCasePatternCondition(context: FunctionLowering, subject: string, subjectType: ResolvedType, pattern: CasePattern): string {
+  typeName := resolvedName(subjectType, context.names)
+  case pattern {
+    type_: TypePattern -> {
+      let targets: string[] = []
+      if type_.resolvedType == none || !caseTypeTargets(type_.resolvedType!, targets) || targets.length == 0 {
+        context.failed = "unsupported case type pattern"; return ""
+      }
+      if typeName != "any" { return result(context, "const", ["true"], "bool") }
+      return lowerCaseTypeCondition(context, subject, targets)
+    }
+    _: WildcardPattern -> { return result(context, "const", ["true"], "bool") }
+    _ -> { }
   }
+  // The checked subject is evaluated once. Reuse ordinary comparison and
+  // short-circuit lowering for value/range tests and their side effects.
+  name := "%doof_case_subject_" + string(context.nextBlock) + "_" + string(context.nextValue)
+  context.bindings.push(SourceBinding { name, typeName, valueName: subject })
+  receiver := Identifier { kind: "identifier", name, resolvedType: subjectType, span: pattern.span }
+  boolType := PrimitiveType { name: "bool" }
+  case pattern {
+    value: ValuePattern -> {
+      if typeName == "none" { return result(context, "const", ["true"], "bool") }
+      return lowerExpression(context, BinaryExpression {
+        kind: "binary-expression", operator: "==", left: receiver, right: value.value,
+        resolvedType: boolType, span: pattern.span,
+      })
+    }
+    range: RangePattern -> {
+      let condition: Expression = BoolLiteral { kind: "bool-literal", value: true, resolvedType: boolType, span: pattern.span }
+      if range.start != none {
+        condition = BinaryExpression { kind: "binary-expression", operator: ">=", left: receiver, right: range.start!, resolvedType: boolType, span: pattern.span }
+      }
+      if range.end != none {
+        upper := BinaryExpression { kind: "binary-expression", operator: if range.inclusive then "<=" else "<", left: receiver, right: range.end!, resolvedType: boolType, span: pattern.span }
+        condition = BinaryExpression { kind: "binary-expression", operator: "&&", left: condition, right: upper, resolvedType: boolType, span: pattern.span }
+      }
+      return lowerExpression(context, condition)
+    }
+    _ -> { context.failed = "unsupported case pattern"; return "" }
+  }
+}
+
+function lowerCaseArmCondition(context: FunctionLowering, subject: string, subjectType: ResolvedType, patterns: CasePattern[]): string {
+  if patterns.length == 1 { return lowerCasePatternCondition(context, subject, subjectType, patterns[0]) }
+  id := context.nextBlock
+  context.nextBlock += 1
+  joinName := "case_alternative_match" + string(id)
+  matched := "%case_alternative_match" + string(id)
+  locals := latestLocals(context)
+  for index of 0..<patterns.length {
+    condition := lowerCasePatternCondition(context, subject, subjectType, patterns[index])
+    if context.failed != "" { return "" }
+    if index + 1 == patterns.length { effect(context, "jump", concatValues([joinName, condition], bindingValues(context, locals))) }
+    else {
+      nextName := "case_alternative_test" + string(id) + "_" + string(index + 1)
+      effect(context, "branch", concatValues(concatValues([condition, joinName, condition], bindingValues(context, locals)), ["|", nextName]))
+      context.currentBlock = MinusBlock { name: nextName, sourcePath: context.sourcePath }
+      context.blocks.push(context.currentBlock)
+    }
+  }
+  let params: MinusValue[] = [MinusValue { name: matched, typeName: "bool" }]
+  for index of 0..<locals.length {
+    valueName := "%case_alternative_local" + string(id) + "_" + string(index)
+    binding := locals[index]
+    storageType := if binding.boxedTypeName == "" then binding.typeName else binding.boxedTypeName
+    params.push(MinusValue { name: valueName, typeName: storageType })
+    context.bindings.push(SourceBinding { name: binding.name, typeName: binding.typeName, valueName, mutable: binding.mutable, origin: binding.origin, boxedTypeName: binding.boxedTypeName })
+  }
+  context.currentBlock = MinusBlock { name: joinName, params, sourcePath: context.sourcePath }
+  context.blocks.push(context.currentBlock)
+  return matched
+}
+
+function lowerCaseBranches(context: FunctionLowering, statement: CaseStatement, valueType: string = ""): string {
+  subjectType := typeFromValue(statement.subject, context.names)
+  if subjectType == "" { context.failed = "unsupported case subject type"; return "" }
   if statement.arms.length == 0 {
     context.failed = "case statement needs at least one arm"
-    return
+    return ""
   }
-  let targets: string[][] = []
   let wildcards: bool[] = []
   for armIndex of 0..<statement.arms.length {
     arm := statement.arms[armIndex]
-    if arm.patterns.length != 1 {
-      context.failed = "case arms currently support one pattern each"
-      return
-    }
-    let target: string[] = []
     let wildcard = false
-    case arm.patterns[0] {
-      pattern: TypePattern -> {
-        if pattern.resolvedType == none { context.failed = "unresolved case type pattern"; return }
-        if !caseTypeTargets(pattern.resolvedType!, target) || target.length == 0 { context.failed = "unsupported case type pattern"; return }
-      }
-      pattern: ValuePattern -> {
-        case pattern.value {
-          _: NoneLiteral -> { target.push("none") }
-          _ -> { context.failed = "case value patterns currently support only none"; return }
+    for pattern of arm.patterns {
+      case pattern {
+        _: WildcardPattern -> { wildcard = true }
+        type_: TypePattern -> {
+          if arm.patterns.length > 1 && type_.name != "_" {
+            context.failed = "multiple case patterns with named type captures are not supported by doof-wasm"; return ""
+          }
         }
+        _ -> { }
       }
-      _: WildcardPattern -> { wildcard = true }
-      _ -> { context.failed = "case range patterns are not supported by doof-wasm"; return }
     }
     if wildcard && armIndex != statement.arms.length - 1 {
       context.failed = "wildcard case pattern must be the final arm"
-      return
+      return ""
     }
-    targets.push(target)
-    wildcards.push(wildcard)
+    wildcards.push(wildcard && arm.patterns.length == 1)
   }
 
   subject := lowerExpression(context, statement.subject)
-  if context.failed != "" { return }
+  if context.failed != "" || context.terminated { return "" }
+  let armExpressions: Expression[] = []
+  for arm of statement.arms {
+    for pattern of arm.patterns {
+      case pattern {
+        value: ValuePattern -> { armExpressions.push(value.value) }
+        range: RangePattern -> { if range.start != none { armExpressions.push(range.start!) } if range.end != none { armExpressions.push(range.end!) } }
+        _ -> { }
+      }
+    }
+    case arm.body { body: Block -> { collectBlockExpressions(body, armExpressions) }, expression: Expression -> { armExpressions.push(expression) } }
+  }
+  prepareValueCaptures(context, armExpressions)
+  if context.failed != "" { return "" }
   locals := latestLocals(context)
   id := context.nextBlock
   context.nextBlock = context.nextBlock + 1
@@ -390,33 +542,39 @@ function lowerCaseStatement(context: FunctionLowering, statement: CaseStatement)
     armNames.push(armName)
     armContext := blockContext(context, locals, id, "a" + string(index), armName)
     subjectParam := "%b" + string(id) + "a" + string(index) + string(locals.length)
-    armContext.currentBlock.params.push(MinusValue { name: subjectParam, typeName: "any" })
+    armContext.currentBlock.params.push(MinusValue { name: subjectParam, typeName: subjectType })
     armSubjectParams.push(subjectParam)
     armContexts.push(armContext)
     if index > 0 {
       testName := "case_test" + string(id) + "_" + string(index)
       testContext := blockContext(context, locals, id, "t" + string(index), testName)
       subjectParam := "%b" + string(id) + "t" + string(index) + string(locals.length)
-      testContext.currentBlock.params.push(MinusValue { name: subjectParam, typeName: "any" })
+      testContext.currentBlock.params.push(MinusValue { name: subjectParam, typeName: subjectType })
       testSubjectParams.push(subjectParam)
       testContexts.push(testContext)
     }
   }
 
+  joinName := "case_join" + string(id)
+  valueName := "%case_value" + string(id)
   let nextValue = context.nextValue
   let nextBlock = context.nextBlock
+  let closureIndex = context.closureIndex
   for index of 0..<statement.arms.length {
     testContext := if index == 0 then context else testContexts[index - 1]
     testSubject := if index == 0 then subject else testSubjectParams[index - 1]
     testContext.nextValue = nextValue
     testContext.nextBlock = nextBlock
+    testContext.closureIndex = closureIndex
     if wildcards[index] {
       effect(testContext, "jump", concatValues([armNames[index]], concatValues(bindingValues(testContext, locals), [testSubject])))
       nextValue = testContext.nextValue
       nextBlock = testContext.nextBlock
+      closureIndex = testContext.closureIndex
       break
     }
-    condition := lowerCaseTypeCondition(testContext, testSubject, targets[index])
+    condition := lowerCaseArmCondition(testContext, testSubject, statement.subject.resolvedType!, statement.arms[index].patterns)
+    if testContext.failed != "" { context.failed = testContext.failed; return "" }
     noTarget := if index + 1 < statement.arms.length then "case_test" + string(id) + "_" + string(index + 1) else if statement.resolvedCompletes! then "case_join" + string(id) else armNames[statement.arms.length - 1]
     let branchArgs: string[] = [condition, armNames[index]]
     for value of bindingValues(testContext, locals) { branchArgs.push(value) }
@@ -431,41 +589,54 @@ function lowerCaseStatement(context: FunctionLowering, statement: CaseStatement)
     effect(testContext, "branch", branchArgs)
     nextValue = testContext.nextValue
     nextBlock = testContext.nextBlock
+    closureIndex = testContext.closureIndex
   }
 
   for index of 0..<armContexts.length {
     armContext := armContexts[index]
     armContext.nextValue = nextValue
     armContext.nextBlock = nextBlock
+    armContext.closureIndex = closureIndex
     pattern := statement.arms[index].patterns[0]
     case pattern {
       type_: TypePattern -> {
         if type_.name != "_" {
           typeName := resolvedName(type_.resolvedType!, context.names)
-          captured := if typeName == "any" then armSubjectParams[index] else result(armContext, "cast", [armSubjectParams[index], typeName], typeName)
+          captured := if typeName == subjectType then armSubjectParams[index] else if subjectType == "any" then result(armContext, "cast", [armSubjectParams[index], typeName], typeName) else coerceValue(armContext, armSubjectParams[index], subjectType, typeName)
           armContext.bindings.push(SourceBinding { name: type_.name, typeName, valueName: captured })
         }
       }
       _ -> { }
     }
     arm := statement.arms[index]
+    if valueType != "" { armContext.yieldTarget = YieldTarget { joinName, typeName: valueType, locals, scopeDepth: context.scopedValues.length } }
     case arm.body {
       body: Block -> { lowerStatements(armContext, body.statements) }
-      expression: Expression -> { _ := lowerExpression(armContext, expression) }
+      expression: Expression -> {
+        if valueType == "" { _ := lowerExpression(armContext, expression) }
+        else { lowerYield(armContext, expression) }
+      }
     }
-    if armContext.failed != "" { context.failed = armContext.failed; return }
+    if armContext.failed != "" { context.failed = armContext.failed; return "" }
     nextValue = armContext.nextValue
     nextBlock = armContext.nextBlock
+    closureIndex = armContext.closureIndex
   }
 
+  let joins = statement.resolvedCompletes!
+  if valueType != "" {
+    for armContext of armContexts { if jumpsTo(armContext, joinName) { joins = true } }
+  }
   let joinParams: MinusValue[] = []
-  if statement.resolvedCompletes! {
+  if joins {
     for index of 0..<locals.length {
       storageType := if locals[index].boxedTypeName == "" then locals[index].typeName else locals[index].boxedTypeName
       joinParams.push(MinusValue { name: "%b" + string(id) + "j" + string(index), typeName: storageType })
     }
+    if valueType != "" { joinParams.push(MinusValue { name: valueName, typeName: valueType }) }
     for armContext of armContexts {
       if !armContext.terminated {
+        if valueType != "" { context.failed = "case expression arm must yield a value"; return "" }
         effect(armContext, "jump", concatValues(["case_join" + string(id)], bindingValues(armContext, locals)))
       }
     }
@@ -475,16 +646,82 @@ function lowerCaseStatement(context: FunctionLowering, statement: CaseStatement)
   for armContext of armContexts { appendContext(context, armContext) }
   context.nextValue = nextValue
   context.nextBlock = nextBlock
-  if statement.resolvedCompletes! {
+  if joins {
     context.currentBlock = MinusBlock { name: "case_join" + string(id), params: joinParams, sourcePath: context.sourcePath }
     context.blocks.push(context.currentBlock)
     for index of 0..<locals.length {
-      context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
+      context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, origin: locals[index].origin, boxedTypeName: locals[index].boxedTypeName })
     }
     context.terminated = false
   } else {
     context.terminated = true
   }
+  return if joins && valueType != "" then valueName else ""
+}
+
+// Case expressions share the statement pattern dispatcher, but each arm exits
+// through a scoped value target instead of falling through to a statement join.
+function lowerCaseExpression(context: FunctionLowering, expression: CaseExpression): string {
+  let arms: CaseArm[] = []
+  for arm of expression.arms { arms.push(CaseArm { kind: "case-arm", patterns: arm.patterns, body: arm.body, span: arm.span }) }
+  typeName := if expression.resolvedType!.kind == "never" then "none" else typeFromValue(expression, context.names)
+  if typeName == "" { context.failed = "unsupported case expression result type"; return "" }
+  return lowerCaseBranches(context, CaseStatement { kind: "case-statement", subject: expression.subject, arms, resolvedSubjectType: expression.resolvedSubjectType, resolvedCompletes: false, span: expression.span }, typeName)
+}
+
+function lowerYield(context: FunctionLowering, expression: Expression): none {
+  if context.yieldTarget != none {
+    target := context.yieldTarget!
+    value := lowerExpected(context, expression, target.typeName)
+    if context.failed != "" || context.terminated { return }
+    values := leaveWithScopes(context, target.scopeDepth, concatValues(bindingValues(context, target.locals), [value]))
+    effect(context, "jump", concatValues([target.joinName], values))
+    context.terminated = true
+    return
+  }
+  if context.completionType == "" { context.failed = "yield requires a value block or synchronousAsync self-hosting mode"; return }
+  value := lowerExpected(context, expression, context.completionType)
+  if context.failed != "" || context.terminated { return }
+  completion := completionSuccess(context, value, context.completionType)
+  effect(context, "return", [completion])
+  context.terminated = true
+}
+
+function lowerYieldBlock(context: FunctionLowering, expression: YieldBlockExpression): string {
+  typeName := if expression.resolvedType!.kind == "never" then "none" else typeFromValue(expression, context.names)
+  if typeName == "" { context.failed = "unsupported yield block result type"; return "" }
+  let expressions: Expression[] = []
+  collectBlockExpressions(expression.body, expressions)
+  prepareValueCaptures(context, expressions)
+  if context.failed != "" { return "" }
+  locals := latestLocals(context)
+  id := context.nextBlock
+  context.nextBlock += 1
+  bodyName := "yield_body" + string(id)
+  joinName := "yield_join" + string(id)
+  effect(context, "jump", concatValues([bodyName], bindingValues(context, locals)))
+  bodyContext := blockContext(context, locals, id, "y", bodyName)
+  bodyContext.yieldTarget = YieldTarget { joinName, typeName, locals, scopeDepth: context.scopedValues.length }
+  lowerStatements(bodyContext, expression.body.statements)
+  if bodyContext.failed != "" { context.failed = bodyContext.failed; return "" }
+  if !bodyContext.terminated { context.failed = "value block must yield a value"; return "" }
+  joins := jumpsTo(bodyContext, joinName)
+  appendContext(context, bodyContext)
+  context.terminated = !joins
+  if !joins { return "" }
+  let params: MinusValue[] = []
+  for index of 0..<locals.length {
+    binding := locals[index]
+    storageType := if binding.boxedTypeName == "" then binding.typeName else binding.boxedTypeName
+    name := "%yield_local" + string(id) + "_" + string(index)
+    params.push(MinusValue { name, typeName: storageType })
+    context.bindings.push(SourceBinding { name: binding.name, typeName: binding.typeName, valueName: name, mutable: binding.mutable, origin: binding.origin, boxedTypeName: binding.boxedTypeName })
+  }
+  valueName := "%yield_value" + string(id)
+  params.push(MinusValue { name: valueName, typeName })
+  context.currentBlock = MinusBlock { name: joinName, params, sourcePath: context.sourcePath }
+  context.blocks.push(context.currentBlock)
+  return valueName
 }
 
 function lowerArrayLiteral(context: FunctionLowering, literal: ArrayLiteral, expression: Expression): string {
@@ -584,6 +821,34 @@ function closureCaptures(context: FunctionLowering, expression: LambdaExpression
   return captures
 }
 
+function boxMutableCapture(context: FunctionLowering, capture: SourceBinding): none {
+  if !capture.mutable || capture.boxedTypeName != "" { return }
+  boxClassName := context.closurePrefix + "_box_" + string(context.closureIndex)
+  context.closureIndex += 1
+  boxClass := MinusClass { name: boxClassName, line: context.currentLine, sourcePath: context.sourcePath }
+  boxClass.fields.push(MinusField { name: "value", typeName: capture.typeName, mutable: true, line: context.currentLine, sourcePath: context.sourcePath })
+  context.module_!.classes.push(boxClass)
+  boxed := result(context, "box", [boxClassName, capture.valueName], boxClassName)
+  context.bindings.push(SourceBinding { name: capture.name, typeName: capture.typeName, valueName: boxed, mutable: true, origin: capture.origin, boxedTypeName: boxClassName })
+}
+
+// Allocate shared mutable capture storage before branching, so every value
+// edge carries the same storage type, even when only one arm creates a closure.
+function prepareValueCaptures(context: FunctionLowering, expressions: Expression[]): none {
+  let cursor = 0
+  while cursor < expressions.length {
+    expression := expressions[cursor]
+    cursor += 1
+    case expression {
+      lambda: LambdaExpression -> {
+        for capture of closureCaptures(context, lambda) { boxMutableCapture(context, capture) }
+      }
+      _ -> { }
+    }
+    collectNestedExpressions(expression, expressions)
+  }
+}
+
 function ensureClosureInterface(context: FunctionLowering, function_: FunctionType, name: string): none {
   if context.module_ == none { context.failed = "closure lowering has no module context"; return }
   registerClosureType(context.module_!, function_, context.currentLine, context.sourcePath, context.names)
@@ -671,15 +936,8 @@ function lowerLambda(context: FunctionLowering, expression: LambdaExpression, ca
   for index of 0..<captures.length {
     let capture = captures[index]
     if capture.mutable && capture.boxedTypeName == "" {
-      boxClassName := context.closurePrefix + "_box_" + string(context.closureIndex) + "_" + string(index)
-      context.closureIndex = context.closureIndex + 1
-      boxClass := MinusClass { name: boxClassName, line: context.currentLine, sourcePath: context.sourcePath }
-      boxClass.fields.push(MinusField { name: "value", typeName: capture.typeName, mutable: true, line: context.currentLine, sourcePath: context.sourcePath })
-      context.module_!.classes.push(boxClass)
-      current := findBinding(context, capture.name)
-      if current == none { context.failed = "missing captured binding " + capture.name; return "" }
-      boxed := result(context, "box", [boxClassName, current!.valueName], boxClassName)
-      context.bindings.push(SourceBinding { name: capture.name, typeName: capture.typeName, valueName: boxed, mutable: true, boxedTypeName: boxClassName })
+      boxMutableCapture(context, capture)
+      if context.failed != "" { return "" }
       capture = findBinding(context, capture.name)!
       captures[index] = capture
     }
@@ -711,7 +969,7 @@ function lowerLambda(context: FunctionLowering, expression: LambdaExpression, ca
     capture := captures[index]
     captureStorageType := if capture.boxedTypeName == "" then capture.typeName else capture.boxedTypeName
     captured := result(invoke, "get", ["%self", "_capture_" + string(index)], captureStorageType)
-    invoke.bindings.push(SourceBinding { name: capture.name, typeName: capture.typeName, valueName: captured, mutable: capture.mutable, boxedTypeName: capture.boxedTypeName })
+    invoke.bindings.push(SourceBinding { name: capture.name, typeName: capture.typeName, valueName: captured, mutable: capture.mutable, origin: capture.origin, boxedTypeName: capture.boxedTypeName })
   }
   for index of 0..<expression.params.length {
     parameter := expression.params[index]
@@ -801,6 +1059,8 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       if context.failed != "" { return "" }
       return lowerConditionalValue(context, condition, value.then_, value.else_, typeFromValue(expression, context.names), "if_value")
     }
+    value: CaseExpression -> { return lowerCaseExpression(context, value) }
+    value: YieldBlockExpression -> { return lowerYieldBlock(context, value) }
     value: Identifier -> {
       if value.resolvedBinding != none && value.resolvedBinding!.kind == "field" {
         self := findBinding(context, "this")
@@ -822,7 +1082,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
             if !constantExpression(constant.value) { context.failed = "top-level constant " + name + " requires a literal constant initializer"; return "" }
             context.expandingConstants.push(key)
             emitted := lowerExpected(context, constant.value, typeFromValue(expression, context.names))
-            _ := try! context.expandingConstants.pop()
+            _ := context.expandingConstants.pop()!
             return emitted
           }
         }
@@ -876,11 +1136,11 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       let right = lowerExpression(context, value.right)
       if context.failed != "" { return "" }
       if ["==", "!="].contains(value.operator) &&
-          (typeFromValue(value.left, context.names) == "any" || typeFromValue(value.right, context.names) == "any") {
+          (typeFromValue(value.left, context.names) == "any" || typeFromValue(value.right, context.names) == "any" || hasResultArmType(value.left.resolvedType) || hasResultArmType(value.right.resolvedType)) {
         left = coerceValue(context, left, typeFromValue(value.left, context.names), "any")
         right = coerceValue(context, right, typeFromValue(value.right, context.names), "any")
         if context.failed != "" { return "" }
-        equal := result(context, "eq", [left, right], "bool")
+        equal := if hasResultArmType(value.left.resolvedType) || hasResultArmType(value.right.resolvedType) then lowerResultEquality(context, left, right) else result(context, "eq", [left, right], "bool")
         if value.operator == "==" { return equal }
         no := result(context, "const", ["false"], "bool")
         return result(context, "eq", [equal, no], "bool")
@@ -889,6 +1149,16 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
         targetType := typeFromValue(expression, context.names)
         if typeFromValue(value.left, context.names) != targetType { left = result(context, "convert", [left], targetType) }
         if typeFromValue(value.right, context.names) != targetType { right = result(context, "convert", [right], targetType) }
+      }
+      if ["==", "!=", "<", ">", "<=", ">="].contains(value.operator) {
+        leftType := typeFromValue(value.left, context.names)
+        rightType := typeFromValue(value.right, context.names)
+        numeric := ["byte", "int", "long", "float", "double"]
+        if leftType != rightType && numeric.contains(leftType) && numeric.contains(rightType) {
+          targetType := if leftType == "double" || rightType == "double" then "double" else if leftType == "float" || rightType == "float" then "float" else if leftType == "long" || rightType == "long" then "long" else "int"
+          if leftType != targetType { left = result(context, "convert", [left], targetType) }
+          if rightType != targetType { right = result(context, "convert", [right], targetType) }
+        }
       }
       let op = value.operator
       if op == "+" { op = "add" }
@@ -957,7 +1227,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
             effect(context, "set", [binding!.valueName, "value", stored])
             return assigned
           }
-          context.bindings.push(SourceBinding { name: target.name, typeName: binding!.typeName, valueName: stored, mutable: binding!.mutable })
+          context.bindings.push(SourceBinding { name: target.name, typeName: binding!.typeName, valueName: stored, mutable: binding!.mutable, origin: binding!.origin })
           return assigned
         }
         target: MemberExpression -> {
@@ -996,28 +1266,11 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
       }
     }
     value: UnaryExpression -> {
-      if value.operator == "!" && !value.prefix && value.operand.resolvedType != none {
-        case value.operand.resolvedType! {
-          _: ResultResolvedType -> {
-            return lowerTryOperator(context, UnaryExpression {
-              kind: value.kind, operator: "try!", prefix: true, operand: value.operand,
-              span: value.span, resolvedType: value.resolvedType,
-            }, expression)
-          }
-          _ -> { }
-        }
-      }
-      if value.operator == "try!" || value.operator == "try?" || value.operator == "try" {
-        return lowerTryOperator(context, value, expression)
-      }
+      if !value.prefix && (value.operator == "!" || value.operator == "?") { return lowerAbsenceOperator(context, value) }
       operand := lowerExpression(context, value.operand)
       if value.operator == "-" {
         zero := result(context, "const", ["0"], typeFromValue(value.operand, context.names))
         return result(context, "sub", [zero, operand], typeFromValue(expression, context.names))
-      }
-      if value.operator == "!" && !value.prefix {
-        if typeFromValue(value.operand, context.names) == "any" && typeFromValue(expression, context.names) == "any" { return lowerUnionPresence(context, operand) }
-        return if typeFromValue(value.operand, context.names) == "any" then result(context, "cast", [operand, typeFromValue(expression, context.names)], typeFromValue(expression, context.names)) else operand
       }
       if value.operator == "!" {
         no := result(context, "const", ["false"], "bool")
@@ -1080,7 +1333,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
     }
     value: IndexExpression -> {
       if typeFromValue(value.object, context.names) == STRING_BOOL_MAP_CLASS { context.failed = "Map indexing is not supported by doof-wasm; use .get() and .set()"; return "" }
-      if value.optional { context.failed = "optional array indexing is not supported by doof-wasm"; return "" }
+      if value.optional && value.resolvedOptionalReceiver != none { return lowerOptionalIndex(context, value) }
       array := lowerExpression(context, value.object)
       index := lowerExpression(context, value.index)
       return result(context, "call-method", [array, "get", index], typeFromValue(expression, context.names))
@@ -1120,7 +1373,7 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
           payload = result(context, "box", [noneValue], "any")
         }
         instance := result(context, "new", [className, payload], className)
-        return result(context, "box", [instance], "any")
+        return if typeFromValue(expression, context.names) == "any" then result(context, "box", [instance], "any") else instance
       }
       if value.resolvedClass == none { context.failed = "unresolved class construction"; return "" }
       let args: string[] = [qualifiedName(value.resolvedClass!.resolvedSymbol!.module, value.resolvedClass!.name, context.names)]
@@ -1153,6 +1406,30 @@ function lowerExpression(context: FunctionLowering, expression: Expression): str
   }
 }
 
+// Reuse value-branch lowering so the index runs only for a present receiver,
+// including when the index mutates locals or terminates the current path.
+function lowerOptionalIndex(context: FunctionLowering, value: IndexExpression): string {
+  object := lowerExpression(context, value.object)
+  if context.failed != "" || context.terminated { return "" }
+  name := "%doof_optional_receiver_" + string(context.nextBlock)
+  context.bindings.push(SourceBinding { name, typeName: typeFromValue(value.object, context.names), valueName: object })
+  receiver := Identifier { kind: "identifier", name, resolvedType: value.object.resolvedType, span: value.object.span }
+  present := UnaryExpression {
+    kind: "unary-expression", operator: "!", prefix: false, operand: receiver,
+    resolvedType: value.resolvedOptionalReceiver, span: value.object.span,
+  }
+  indexed := IndexExpression {
+    kind: value.kind, object: present, index: value.index, optional: false,
+    resolvedType: value.resolvedOptionalValue, span: value.span,
+  }
+  missing := result(context, "is", [object, "none"], "bool")
+  let absent: Expression = NoneLiteral { kind: "none-literal", resolvedType: NoneType {}, span: value.span }
+  if value.resolvedOptionalValue != none && value.resolvedOptionalValue!.kind == "result" {
+    absent = ConstructExpression { kind: "construct-expression", type_: "Success", typeArgs: [], named: true, args: [ObjectProperty { name: "value", value: absent, span: value.span }], resolvedType: value.resolvedType, span: value.span }
+  }
+  return lowerConditionalValue(context, missing, absent, indexed, typeFromValue(value, context.names), "optional_index")
+}
+
 function lowerOptionalMember(context: FunctionLowering, value: MemberExpression, expression: Expression): string {
   object := lowerExpression(context, value.object)
   if context.failed != "" { return "" }
@@ -1180,7 +1457,9 @@ function lowerOptionalMember(context: FunctionLowering, value: MemberExpression,
   presentContext.currentBlock.params.push(MinusValue { name: presentOwner, typeName: objectTypeName })
   resultType := typeFromValue(expression, context.names)
   let noneValue = result(noneContext, "const", ["none"], "none")
-  if resultType == "any" { noneValue = result(noneContext, "box", [noneValue], "any") }
+  if expression.resolvedType != none && expression.resolvedType!.kind == "result" {
+    noneValue = completionSuccess(noneContext, noneValue, "none")
+  } else if resultType == "any" { noneValue = result(noneContext, "box", [noneValue], "any") }
   presentContext.nextValue = noneContext.nextValue
   presentObjectType := nonNoneTypeName(value.object.resolvedType)
   if presentObjectType == "" {
@@ -1208,7 +1487,7 @@ function lowerOptionalMember(context: FunctionLowering, value: MemberExpression,
   context.currentBlock = MinusBlock { name: joinName, params: joinParams, sourcePath: context.sourcePath }
   context.blocks.push(context.currentBlock)
   for index of 0..<locals.length {
-    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
+    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, origin: locals[index].origin, boxedTypeName: locals[index].boxedTypeName })
   }
   context.terminated = false
   return joined
@@ -1319,6 +1598,60 @@ function lowerUnionField(context: FunctionLowering, value: MemberExpression, own
 }
 
 // A presence assertion on a multi-class union must retain its boxed tag.
+function hasResultArmType(type_: ResolvedType | none): bool {
+  if type_ == none { return false }
+  case type_! {
+    _: ResultResolvedType -> { return true }
+    _: SuccessResolvedType -> { return true }
+    _: FailureResolvedType -> { return true }
+    union_: UnionResolvedType -> { for member of union_.types { if hasResultArmType(member) { return true } } }
+    _ -> { }
+  }
+  return false
+}
+
+// Intrinsic arms are structs: compare their payloads, including nested Results.
+// Other boxed values retain the backend's nominal equality rules.
+function lowerResultEquality(context: FunctionLowering, left: string, right: string): string {
+  if context.module_ == none { context.failed = "Result equality has no module context"; return "" }
+  name := context.closurePrefix + "_result_equal"
+  for function_ of context.module_!.functions {
+    if function_.name == name { return result(context, "call", [name, left, right], "bool") }
+  }
+  helper := unionHelperContext(context)
+  for arm of [RESULT_SUCCESS_CLASS, RESULT_FAILURE_CLASS] {
+    tag := if arm == RESULT_SUCCESS_CLASS then "success" else "failure"
+    isLeft := result(helper, "is", ["%left", arm], "bool")
+    effect(helper, "branch", [isLeft, tag + "_left", "|", tag + "_next"])
+    helper.currentBlock = MinusBlock { name: tag + "_left" }
+    helper.blocks.push(helper.currentBlock)
+    isRight := result(helper, "is", ["%right", arm], "bool")
+    effect(helper, "branch", [isRight, tag + "_payload", "|", "different"])
+    helper.currentBlock = MinusBlock { name: tag + "_payload" }
+    helper.blocks.push(helper.currentBlock)
+    leftArm := result(helper, "cast", ["%left", arm], arm)
+    rightArm := result(helper, "cast", ["%right", arm], arm)
+    property := if arm == RESULT_SUCCESS_CLASS then "value" else "error"
+    leftPayload := result(helper, "get", [leftArm, property], "any")
+    rightPayload := result(helper, "get", [rightArm, property], "any")
+    equal := result(helper, "call", [name, leftPayload, rightPayload], "bool")
+    effect(helper, "return", [equal])
+    helper.currentBlock = MinusBlock { name: tag + "_next" }
+    helper.blocks.push(helper.currentBlock)
+  }
+  equal := result(helper, "eq", ["%left", "%right"], "bool")
+  effect(helper, "return", [equal])
+  helper.currentBlock = MinusBlock { name: "different" }
+  helper.blocks.push(helper.currentBlock)
+  different := result(helper, "const", ["false"], "bool")
+  effect(helper, "return", [different])
+  context.module_!.functions.push(createMinusFunction{
+    name, params: [MinusValue { name: "%left", typeName: "any" }, MinusValue { name: "%right", typeName: "any" }], result: "bool",
+    blocks: helper.blocks, line: context.currentLine, sourcePath: context.sourcePath,
+  })
+  return result(context, "call", [name, left, right], "bool")
+}
+
 function lowerUnionPresence(context: FunctionLowering, owner: string): string {
   if context.module_ == none { context.failed = "union presence assertion has no module context"; return "" }
   name := context.closurePrefix + "_union_present_" + string(context.module_!.functions.length)
@@ -1458,7 +1791,7 @@ function lowerConditionalValue(context: FunctionLowering, condition: string, yes
   context.currentBlock = MinusBlock { name: joinName, params: joinParams, sourcePath: context.sourcePath }
   context.blocks.push(context.currentBlock)
   for index of 0..<locals.length {
-    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
+    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, origin: locals[index].origin, boxedTypeName: locals[index].boxedTypeName })
   }
   context.terminated = false
   return valueName
@@ -1526,7 +1859,8 @@ function lowerCoalesce(context: FunctionLowering, value: BinaryExpression, expre
   presentContext.nextValue = fallbackContext.nextValue
   let presentResult = leftParamName
   if leftType!.kind == "result" {
-    presentResult = result(presentContext, "get", [leftParamName, "value"], "any")
+    arm := result(presentContext, "cast", [leftParamName, RESULT_SUCCESS_CLASS], RESULT_SUCCESS_CLASS)
+    presentResult = result(presentContext, "get", [arm, "value"], "any")
     if presentType != "any" { presentResult = result(presentContext, "cast", [presentResult, presentType], presentType) }
   } else if presentType != "any" {
     presentResult = result(presentContext, "cast", [leftParamName, presentType], presentType)
@@ -1549,13 +1883,13 @@ function lowerCoalesce(context: FunctionLowering, value: BinaryExpression, expre
   context.currentBlock = MinusBlock { name: joinName, params: joinParams, sourcePath: context.sourcePath }
   context.blocks.push(context.currentBlock)
   for index of 0..<locals.length {
-    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
+    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, origin: locals[index].origin, boxedTypeName: locals[index].boxedTypeName })
   }
   context.terminated = false
   return resultName
 }
 
-function lowerTryOperator(context: FunctionLowering, operation: UnaryExpression, expression: Expression): string {
+function lowerTryPropagation(context: FunctionLowering, operation: UnaryExpression, expression: Expression): string {
   operand := lowerExpression(context, operation.operand)
   if context.failed != "" { return "" }
   context.currentLine = expression.span.start.line
@@ -1586,17 +1920,8 @@ function lowerTryOperator(context: FunctionLowering, operation: UnaryExpression,
   failureContext := blockContext(context, locals, id, "f", failureName)
   failureSubject := "%b" + string(id) + "f" + string(locals.length)
   failureContext.currentBlock.params.push(MinusValue { name: failureSubject, typeName: "any" })
-  if operation.operator == "try!" {
-    emitPanic(failureContext)
-  } else if operation.operator == "try" {
-    effect(failureContext, "return", [failureSubject])
-    failureContext.terminated = true
-  } else {
-    let failureValue: string = result(failureContext, "const", ["none"], "none")
-    targetType := typeFromValue(expression, context.names)
-    if targetType == "any" { failureValue = result(failureContext, "box", [failureValue], "any") }
-    effect(failureContext, "jump", concatValues([joinName], concatValues(bindingValues(failureContext, locals), [failureValue])))
-  }
+  effect(failureContext, "return", [failureSubject])
+  failureContext.terminated = true
 
   successContext := blockContext(context, locals, id, "s", successName)
   successSubject := "%b" + string(id) + "s" + string(locals.length)
@@ -1608,10 +1933,7 @@ function lowerTryOperator(context: FunctionLowering, operation: UnaryExpression,
   let successType = ""
   case operandType! { resultType: ResultResolvedType -> { successType = resolvedName(resultType.valueType, context.names) } _ -> { } }
   if successType != "" && successType != "any" { payload = result(successContext, "cast", [payload, successType], successType) }
-  if operation.operator == "try?" {
-    targetType := typeFromValue(expression, context.names)
-    if targetType == "any" && successType != "any" { payload = result(successContext, "box", [payload], "any") }
-  }
+
 
   resultType := typeFromValue(expression, context.names)
   effect(successContext, "jump", concatValues([joinName], concatValues(bindingValues(successContext, locals), [payload])))
@@ -1628,7 +1950,7 @@ function lowerTryOperator(context: FunctionLowering, operation: UnaryExpression,
   context.currentBlock = MinusBlock { name: joinName, params: joinParams, sourcePath: context.sourcePath }
   context.blocks.push(context.currentBlock)
   for index of 0..<locals.length {
-    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
+    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, origin: locals[index].origin, boxedTypeName: locals[index].boxedTypeName })
   }
   context.terminated = false
   return joinNameValue
@@ -1744,7 +2066,7 @@ function lowerCall(context: FunctionLowering, call: CallExpression, expression: 
         }
       }
       if ["Success", "Failure"].contains(callee.name) && callee.resolvedBinding != none && callee.resolvedBinding!.kind == "builtin" {
-        payload := lowerExpected(context, call.args[0].value, "any")
+        payload := if call.args.length == 0 then result(context, "box", [result(context, "const", ["none"], "none")], "any") else lowerExpected(context, call.args[0].value, "any")
         className := if callee.name == "Success" then RESULT_SUCCESS_CLASS else RESULT_FAILURE_CLASS
         instance := result(context, "new", [className, payload], className)
         return if typeFromValue(expression, context.names) == "any" then result(context, "box", [instance], "any") else instance
@@ -1941,7 +2263,9 @@ function lowerOptionalCall(context: FunctionLowering, call: CallExpression, memb
   invokeContext.currentBlock.params.push(MinusValue { name: invokeOwner, typeName: typeFromValue(member.object, context.names) })
   resultType := typeFromValue(expression, context.names)
   let noneValue = result(noneContext, "const", ["none"], "none")
-  if resultType == "any" { noneValue = result(noneContext, "box", [noneValue], "any") }
+  if expression.resolvedType != none && expression.resolvedType!.kind == "result" {
+    noneValue = completionSuccess(noneContext, noneValue, "none")
+  } else if resultType == "any" { noneValue = result(noneContext, "box", [noneValue], "any") }
   invokeContext.nextValue = noneContext.nextValue
   typedOwner := result(invokeContext, "cast", [invokeOwner, receiverTypeName], receiverTypeName)
   syntheticName := "__optional_receiver_" + string(id)
@@ -1949,7 +2273,6 @@ function lowerOptionalCall(context: FunctionLowering, call: CallExpression, memb
   syntheticMember := MemberExpression {
     kind: member.kind, object: synthetic, property: member.property, optional: false, force: member.force,
     completionPoint: member.completionPoint, resolvedStaticOwner: member.resolvedStaticOwner,
-    resolvedNamespaceAccess: member.resolvedNamespaceAccess, resolvedNamespaceSymbol: member.resolvedNamespaceSymbol,
     resolvedMember: member.resolvedMember, resolvedCallableField: member.resolvedCallableField,
     resolvedType: member.resolvedType, span: member.span,
   }
@@ -1979,7 +2302,7 @@ function lowerOptionalCall(context: FunctionLowering, call: CallExpression, memb
   context.currentBlock = MinusBlock { name: joinName, params: joinParams, sourcePath: context.sourcePath }
   context.blocks.push(context.currentBlock)
   for index of 0..<locals.length {
-    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, boxedTypeName: locals[index].boxedTypeName })
+    context.bindings.push(SourceBinding { name: locals[index].name, typeName: locals[index].typeName, valueName: joinParams[index].name, mutable: locals[index].mutable, origin: locals[index].origin, boxedTypeName: locals[index].boxedTypeName })
   }
   context.terminated = false
   return joined
@@ -2077,64 +2400,122 @@ function callParameterType(call: CallExpression, index: int): string {
   return ""
 }
 
-function lowerNullableBinding(context: FunctionLowering, binding: ImmutableBinding): none {
-  value := lowerExpression(context, binding.value)
-  if context.failed != "" { return }
-  typeName := declarationType(binding.resolvedType, typeFromValue(binding.value, context.names), context.names)
-  let resultType: ResultResolvedType | none = none
-  if binding.value.resolvedType != none {
-    case binding.value.resolvedType! { resolved: ResultResolvedType -> { resultType = resolved } _ -> { } }
+// Walk the frontend's absence layers without reevaluating the subject. Inner
+// payloads are read only on the present path of the preceding layer.
+function lowerAbsentLayers(context: FunctionLowering, owner: string, layers: AbsenceLayer[], index: int, targetType: string, force: bool, binding: ImmutableBinding | none = none, errorType: string = ""): string {
+  if index == layers.length {
+    sourceType := resolvedName(layers[index - 1].present, context.names)
+    if binding != none && binding!.name == "_" { return result(context, "const", ["none"], "none") }
+    return coerceValue(context, owner, sourceType, targetType)
   }
-  if typeName == "" || (typeName == "any" && resultType == none) {
-    context.failed = "nullable else bindings need one supported non-none type"
-    return
-  }
-  condition := result(context, "is", [value, if resultType == none then "none" else RESULT_FAILURE_CLASS], "bool")
+  layer := layers[index]
+  sourceType := resolvedName(layer.source, context.names)
+  missing := result(context, "is", [owner, if layer.failure then RESULT_FAILURE_CLASS else "none"], "bool")
   locals := latestLocals(context)
   id := context.nextBlock
-  context.nextBlock = context.nextBlock + 1
-  failureName := "unwrap_none" + string(id)
-  successName := "unwrap_value" + string(id)
-  values := bindingValues(context, locals)
-  let branchArgs: string[] = [condition, failureName]
-  for item of values { branchArgs.push(item) }
-  branchArgs.push(value)
-  branchArgs.push("|"); branchArgs.push(successName)
-  for item of values { branchArgs.push(item) }
-  branchArgs.push(value)
-  effect(context, "branch", branchArgs)
-
-  failureContext := blockContext(context, locals, id, "f", failureName)
-  failureValueName := "%b" + string(id) + "f" + string(locals.length)
-  failureContext.currentBlock.params.push(MinusValue { name: failureValueName, typeName: "any" })
-  if resultType != none && binding.failureName != none && binding.failureName! != "_" {
-    failureArm := result(failureContext, "cast", [failureValueName, RESULT_FAILURE_CLASS], RESULT_FAILURE_CLASS)
-    let failurePayload = result(failureContext, "get", [failureArm, "error"], "any")
-    errorType := resolvedName(resultType!.errorType, context.names)
-    if errorType != "any" { failurePayload = result(failureContext, "cast", [failurePayload, errorType], errorType) }
-    failureContext.bindings.push(SourceBinding { name: binding.failureName!, typeName: errorType, valueName: failurePayload })
+  context.nextBlock += 1
+  missingName := "absent" + string(id)
+  presentName := "present" + string(id)
+  joinName := "absence_join" + string(id)
+  let args: string[] = [missing, missingName]
+  for local of locals { args.push(local.valueName) }
+  args.push(owner); args.push("|"); args.push(presentName)
+  for local of locals { args.push(local.valueName) }
+  args.push(owner)
+  effect(context, "branch", args)
+  absent := blockContext(context, locals, id, "a", missingName)
+  present := blockContext(context, locals, id, "p", presentName)
+  absentOwner := "%b" + string(id) + "a" + string(locals.length)
+  presentOwner := "%b" + string(id) + "p" + string(locals.length)
+  absent.currentBlock.params.push(MinusValue { name: absentOwner, typeName: sourceType })
+  present.currentBlock.params.push(MinusValue { name: presentOwner, typeName: sourceType })
+  let absentValue = ""
+  if binding != none {
+    if binding!.failureName != none && binding!.failureName! != "_" {
+      let error = ""
+      let actualType = "none"
+      if layer.failure {
+        arm := result(absent, "cast", [absentOwner, RESULT_FAILURE_CLASS], RESULT_FAILURE_CLASS)
+        error = result(absent, "get", [arm, "error"], "any")
+        case layer.source { result_: ResultResolvedType -> { actualType = resolvedName(result_.errorType, context.names) } _ -> { } }
+        if actualType != "any" { error = result(absent, "cast", [error, actualType], actualType) }
+      } else { error = result(absent, "const", ["none"], "none") }
+      error = coerceValue(absent, error, actualType, errorType)
+      absent.bindings.push(SourceBinding { name: binding!.failureName!, typeName: errorType, valueName: error, origin: binding!.span.start.offset })
+    }
+    lowerStatements(absent, binding!.else_!.statements)
+    if !absent.terminated && binding!.name != "_" { absent.failed = "nullable else handler must terminate" }
+    if !absent.terminated { absentValue = result(absent, "const", ["none"], "none") }
+  } else if force {
+    message := result(absent, "string-const", [context.sourcePath + ":" + string(context.currentLine) + ": forced unwrap failed: "], STRING_CLASS)
+    let panicMessage = message
+    if layer.failure {
+      case layer.source {
+        result_: ResultResolvedType -> {
+          if resolvedName(result_.errorType, context.names) == STRING_CLASS {
+            arm := result(absent, "cast", [absentOwner, RESULT_FAILURE_CLASS], RESULT_FAILURE_CLASS)
+            payload := result(absent, "get", [arm, "error"], "any")
+            text := result(absent, "cast", [payload, STRING_CLASS], STRING_CLASS)
+            panicMessage = result(absent, "call-method", [message, "concat", text], STRING_CLASS)
+          }
+        }
+        _ -> { }
+      }
+    }
+    emitPanic(absent, panicMessage)
+  } else {
+    absentValue = result(absent, "const", ["none"], "none")
+    absentValue = coerceValue(absent, absentValue, "none", targetType)
   }
-  lowerStatements(failureContext, binding.else_!.statements)
-  if failureContext.failed != "" { context.failed = failureContext.failed; return }
-  if !failureContext.terminated { context.failed = "nullable else handler must terminate"; return }
-
-  successContext := blockContext(context, locals, id, "v", successName)
-  successValueName := "%b" + string(id) + "v" + string(locals.length)
-  successContext.currentBlock.params.push(MinusValue { name: successValueName, typeName: "any" })
-  successContext.nextValue = failureContext.nextValue
-  successContext.nextBlock = failureContext.nextBlock
-  let unwrapped = ""
-  if resultType != none {
-    successArm := result(successContext, "cast", [successValueName, RESULT_SUCCESS_CLASS], RESULT_SUCCESS_CLASS)
-    unwrapped = result(successContext, "get", [successArm, "value"], "any")
-    if typeName != "any" { unwrapped = result(successContext, "cast", [unwrapped, typeName], typeName) }
-  } else { unwrapped = result(successContext, "cast", [successValueName, typeName], typeName) }
-  if binding.name != "_" { successContext.bindings.push(SourceBinding { name: binding.name, typeName, valueName: unwrapped }) }
-  appendContext(context, failureContext)
-  appendContext(context, successContext)
-  context.currentBlock = successContext.currentBlock
-  if binding.name != "_" { context.bindings.push(SourceBinding { name: binding.name, typeName, valueName: unwrapped }) }
+  present.nextValue = absent.nextValue
+  present.nextBlock = absent.nextBlock
+  let payload = presentOwner
+  presentTypeName := resolvedName(layer.present, context.names)
+  if layer.failure {
+    arm := result(present, "cast", [presentOwner, RESULT_SUCCESS_CLASS], RESULT_SUCCESS_CLASS)
+    payload = result(present, "get", [arm, "value"], "any")
+    if presentTypeName != "any" { payload = result(present, "cast", [payload, presentTypeName], presentTypeName) }
+  } else if presentTypeName != "any" { payload = result(present, "cast", [presentOwner, presentTypeName], presentTypeName) }
+  presentValue := lowerAbsentLayers(present, payload, layers, index + 1, targetType, force, binding, errorType)
+  if absent.failed != "" { context.failed = absent.failed; return "" }
+  if present.failed != "" { context.failed = present.failed; return "" }
+  let params: MinusValue[] = []
+  for i of 0..<locals.length {
+    storageType := if locals[i].boxedTypeName == "" then locals[i].typeName else locals[i].boxedTypeName
+    params.push(MinusValue { name: "%b" + string(id) + "j" + string(i), typeName: storageType })
+  }
+  joined := "%b" + string(id) + "j" + string(locals.length)
+  params.push(MinusValue { name: joined, typeName: targetType })
+  if !absent.terminated { effect(absent, "jump", concatValues([joinName], concatValues(bindingValues(absent, locals), [absentValue]))) }
+  if !present.terminated { effect(present, "jump", concatValues([joinName], concatValues(bindingValues(present, locals), [presentValue]))) }
+  appendContext(context, absent)
+  appendContext(context, present)
+  context.currentBlock = MinusBlock { name: joinName, params, sourcePath: context.sourcePath }
+  context.blocks.push(context.currentBlock)
+  for i of 0..<locals.length {
+    context.bindings.push(SourceBinding { name: locals[i].name, typeName: locals[i].typeName, valueName: params[i].name, mutable: locals[i].mutable, origin: locals[i].origin, boxedTypeName: locals[i].boxedTypeName })
+  }
   context.terminated = false
+  return joined
+}
+
+function lowerAbsenceOperator(context: FunctionLowering, value: UnaryExpression): string {
+  owner := lowerExpression(context, value.operand)
+  if context.failed != "" || context.terminated { return "" }
+  context.currentLine = value.span.start.line
+  layers := absenceLayers(value.operand.resolvedType!)
+  if layers.length == 0 { return owner }
+  return lowerAbsentLayers(context, owner, layers, 0, typeFromValue(value, context.names), value.operator == "!")
+}
+
+function lowerNullableBinding(context: FunctionLowering, binding: ImmutableBinding): none {
+  owner := lowerExpression(context, binding.value)
+  if context.failed != "" || context.terminated { return }
+  sourceType := binding.value.resolvedType!
+  typeName := if binding.name == "_" then "none" else annotationName(binding.resolvedType, context.names)
+  errorType := annotationName(absenceErrorType(sourceType), context.names)
+  unwrapped := lowerAbsentLayers(context, owner, absenceLayers(sourceType), 0, typeName, false, binding, errorType)
+  if binding.name != "_" { context.bindings.push(SourceBinding { name: binding.name, typeName, valueName: unwrapped, origin: binding.span.start.offset }) }
 }
 
 function lowerStatements(context: FunctionLowering, statements: Statement[]): none {
@@ -2154,17 +2535,17 @@ function lowerStatements(context: FunctionLowering, statements: Statement[]): no
         if value.name == "_" { _ := lowerExpression(context, value.value); continue }
         typeName := declarationType(value.resolvedType, typeFromValue(value.value, context.names), context.names)
         emitted := lowerExpected(context, value.value, typeName)
-        if !context.terminated { context.bindings.push(SourceBinding { name: value.name, typeName, valueName: emitted }) }
+        if !context.terminated { context.bindings.push(SourceBinding { name: value.name, typeName, valueName: emitted, origin: value.span.start.offset }) }
       }
       value: ReadonlyDeclaration -> {
         typeName := declarationType(value.resolvedType, typeFromValue(value.value, context.names), context.names)
         emitted := lowerExpected(context, value.value, typeName)
-        if !context.terminated { context.bindings.push(SourceBinding { name: value.name, typeName, valueName: emitted }) }
+        if !context.terminated { context.bindings.push(SourceBinding { name: value.name, typeName, valueName: emitted, origin: value.span.start.offset }) }
       }
       value: LetDeclaration -> {
         typeName := declarationType(value.resolvedType, typeFromValue(value.value, context.names), context.names)
         emitted := lowerExpected(context, value.value, typeName)
-        if !context.terminated { context.bindings.push(SourceBinding { name: value.name, typeName, valueName: emitted, mutable: true }) }
+        if !context.terminated { context.bindings.push(SourceBinding { name: value.name, typeName, valueName: emitted, mutable: true, origin: value.span.start.offset }) }
       }
       value: ReturnStatement -> {
         if value.value == none {
@@ -2181,12 +2562,16 @@ function lowerStatements(context: FunctionLowering, statements: Statement[]): no
           if !context.terminated { effect(context, "return", [returned]); context.terminated = true }
         }
       }
-      value: YieldStatement -> {
-        if context.completionType == "" { context.failed = "yield requires synchronousAsync self-hosting mode"; return }
-        returned := lowerExpected(context, value.value, context.completionType)
+      value: YieldStatement -> { lowerYield(context, value.value) }
+      value: YieldBlockAssignmentStatement -> {
+        binding := findBinding(context, value.name)
+        if binding == none { context.failed = "unknown yield block assignment target " + value.name; return }
+        emitted := lowerExpected(context, value.value, binding!.typeName)
+        if context.failed != "" { return }
         if !context.terminated {
-          completion := completionSuccess(context, returned, context.completionType)
-          effect(context, "return", [completion]); context.terminated = true
+          current := findBinding(context, value.name)!
+          if current.boxedTypeName != "" { effect(context, "set", [current.valueName, "value", emitted]) }
+          else { context.bindings.push(SourceBinding { name: current.name, typeName: current.typeName, valueName: emitted, mutable: current.mutable, origin: current.origin }) }
         }
       }
       value: ExpressionStatement -> { _ := lowerExpression(context, value.expression) }
@@ -2195,10 +2580,11 @@ function lowerStatements(context: FunctionLowering, statements: Statement[]): no
       value: ContinueStatement -> { lowerLoopExit(context, true, value.label) }
       _: Block -> { context.failed = "nested lexical blocks are not supported by doof-wasm"; return }
       value: IfStatement -> { lowerIf(context, value) }
-      value: CaseStatement -> { lowerCaseStatement(context, value) }
+      value: CaseStatement -> { _ := lowerCaseBranches(context, value) }
       value: WhileStatement -> { lowerWhile(context, value) }
       value: ForStatement -> { lowerFor(context, value) }
       value: ForOfStatement -> { lowerForOf(context, value) }
+      value: WithStatement -> { lowerWith(context, value) }
       _ -> { context.failed = "statement is not supported by doof-wasm"; return }
     }
   }
@@ -2303,10 +2689,15 @@ function lowerAssigned(context: FunctionLowering, assignment: AssignmentExpressi
 }
 
 function lowerLoopExit(context: FunctionLowering, continuing: bool, label: string | none): none {
-  if label != none { context.failed = "labeled loop exits are not supported by doof-wasm"; return }
   if context.loopTarget == none { context.failed = "loop exit outside a loop"; return }
-  target := context.loopTarget!
-  effect(context, "jump", concatValues([if continuing then target.continueName else target.breakName], bindingValues(context, target.locals)))
+  let selected = context.loopTarget
+  if label != none {
+    while selected != none && selected!.label != label { selected = selected!.parent }
+  }
+  if selected == none { context.failed = "unknown loop label " + label!; return }
+  target := selected!
+  values := leaveWithScopes(context, target.scopeDepth, bindingValues(context, target.locals))
+  effect(context, "jump", concatValues([if continuing then target.continueName else target.breakName], values))
   context.terminated = true
 }
 
@@ -2314,15 +2705,22 @@ function lowerTryStatement(context: FunctionLowering, statement: TryStatement): 
   let operand: Expression | none = none
   let name = "_"
   let mutable = false
+  let bindingType: ResolvedType | none = none
+  let assignment: AssignmentExpression | none = none
   case statement.binding {
     binding: ImmutableBinding -> {
       if binding.else_ != none { context.failed = "try binding else handlers are not supported by doof-wasm"; return }
-      operand = binding.value; name = binding.name
+      operand = binding.value; name = binding.name; bindingType = binding.resolvedType
     }
-    binding: ReadonlyDeclaration -> { operand = binding.value; name = binding.name }
-    binding: ConstDeclaration -> { operand = binding.value; name = binding.name }
-    binding: LetDeclaration -> { operand = binding.value; name = binding.name; mutable = true }
-    binding: ExpressionStatement -> { operand = binding.expression }
+    binding: ReadonlyDeclaration -> { operand = binding.value; name = binding.name; bindingType = binding.resolvedType }
+    binding: ConstDeclaration -> { operand = binding.value; name = binding.name; bindingType = binding.resolvedType }
+    binding: LetDeclaration -> { operand = binding.value; name = binding.name; mutable = true; bindingType = binding.resolvedType }
+    binding: ExpressionStatement -> {
+      case binding.expression {
+        assigned: AssignmentExpression -> { assignment = assigned; operand = assigned.value }
+        expression: Expression -> { operand = expression }
+      }
+    }
     _ -> { context.failed = "try destructuring is not supported by doof-wasm"; return }
   }
   let valueType: ResolvedType | none = none
@@ -2330,8 +2728,20 @@ function lowerTryStatement(context: FunctionLowering, statement: TryStatement): 
     case operand!.resolvedType! { resultType: ResultResolvedType -> { valueType = resultType.valueType } _ -> { } }
   }
   operation := UnaryExpression { kind: "unary-expression", operator: "try", prefix: true, operand: operand!, resolvedType: valueType, span: statement.span }
-  emitted := lowerTryOperator(context, operation, operation)
-  if name != "_" { context.bindings.push(SourceBinding { name, typeName: annotationName(valueType, context.names), valueName: emitted, mutable }) }
+  emitted := lowerTryPropagation(context, operation, operation)
+  if assignment != none {
+    temporary := "%try_assignment_" + string(context.nextBlock)
+    context.bindings.push(SourceBinding { name: temporary, typeName: annotationName(valueType, context.names), valueName: emitted })
+    expression := Identifier { kind: "identifier", name: temporary, resolvedType: valueType, span: statement.span }
+    _ := lowerExpression(context, AssignmentExpression {
+      kind: assignment!.kind, operator: "=", target: assignment!.target, value: expression,
+      resolvedType: assignment!.resolvedType, span: statement.span,
+    })
+  } else if name != "_" {
+    typeName := annotationName(bindingType, context.names)
+    stored := coerceValue(context, emitted, annotationName(valueType, context.names), typeName)
+    context.bindings.push(SourceBinding { name, typeName, valueName: stored, mutable, origin: statement.span.start.offset })
+  }
 }
 
 function propertyExpression(property: ObjectProperty): Expression {

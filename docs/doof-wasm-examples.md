@@ -32,7 +32,7 @@ a loop-carried local value; and `readAfterIncrement` constructs a class, calls
 an instance method, converts it to an interface, and dispatches through that
 interface.
 
-`byte-arrays.do` creates a bounded byte array, updates an indexed value, and
+`byte-arrays.do` exports `byteSum`, which creates a bounded byte array, updates an indexed value, and
 returns a sum that includes the array length.
 
 `nullable-branches.do` combines `else if` branches with an `int | none` return

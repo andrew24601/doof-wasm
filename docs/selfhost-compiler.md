@@ -5,18 +5,19 @@ source compiler. It uses `compileDoofWasmSourcesWithBindings`, which analyzes an
 lowers once and returns bytes and JavaScript bindings from that same module.
 The byte-only `compileDoofWasmSources` API remains available.
 
-**Bootstrap status:** the complete 79-module entry graph compiles to Wasm and
+**Bootstrap status:** the complete 84-module entry graph compiles to Wasm and
 executes through its generated host API. The analyzer, resolver, checker,
 lowerer, encoder, and binding renderer compile in-memory and caller-loaded
-projects. The maintained acceptance gate compares 12 native/Wasm reference
+projects. The maintained acceptance gate compares 14 native/Wasm reference
 cases, including exact bytes and bindings, diagnostics, imported enum
-interpolation, a large literal, and execution of generated programs. Repeated
+interpolation, layered Result/none handling, removed-syntax diagnostics, a large
+literal, and execution of generated programs. Repeated
 success/failure calls in that corpus preserve compiler heap roots and exercise
 memory growth.
 The frozen compiler source graph now has a verified native/stage-2/stage-3
-artifact fixed point. The 2026-09-29 baseline is 1,256,499 bytes, rebuilds
-itself in 3.300 seconds (three-run median), and passes full-graph heap cleanup
-and the 12-case corpus.
+artifact fixed point. The 2026-10-02 baseline is 1,523,658 bytes, rebuilds
+itself in approximately 3.6 seconds in each Wasm stage, and passes full-graph
+heap cleanup and the 14-case corpus.
 
 ## Host protocol
 

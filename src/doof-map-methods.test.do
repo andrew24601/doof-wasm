@@ -9,11 +9,11 @@ import { renderDoofJs } from "./minus-js"
 
 function checkMaps(sources: SourceFile[], script: string, options: WasmLoweringOptions = WasmLoweringOptions {}): none {
   module_ := lowerDoofWasmSources{sources, entry: "/main.do", options} else error { panic(error) }
-  bytes := try! encodeDoofMinus(module_, true)
+  bytes := encodeDoofMinus(module_, true)!
   base := "/tmp/doof-map-methods-" + string(pid())
-  try! writeBlob(base + ".wasm", bytes.cloneReadonly())
-  try! writeText(base + ".mjs", renderDoofJs(module_, true))
-  result := try! run("node", ["-e", `
+  writeBlob(base + ".wasm", bytes.cloneReadonly())!
+  writeText(base + ".mjs", renderDoofJs(module_, true))!
+  result := run("node", ["-e", `
 const fs=require('fs'),assert=require('assert'),{pathToFileURL}=require('url');
 (async()=>{
 const ffi=await import(pathToFileURL(process.argv[1]+'.mjs').href);
@@ -23,9 +23,9 @@ const live=()=>heap.dumpHeap().filter(block=>block.kind!=='free').map(block=>[bl
 const baseline=live();
 ${script}
 })().catch(error=>{console.error(error);process.exit(1)});
-`, base], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
-  try! remove(base + ".wasm")
-  try! remove(base + ".mjs")
+`, base], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
+  remove(base + ".wasm")!
+  remove(base + ".mjs")!
   if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
   Assert.equal(result.exitCode, 0)
 }
@@ -37,7 +37,7 @@ export class JsonEligibilityCache {
   serialization: Map<string, bool> = {}
   deserialization: Map<string, bool> = {}
 }
-export function read(values: Map<string, bool>, key: string): bool => try! values.get(key)
+export function read(values: Map<string, bool>, key: string): bool => values.get(key)!
 ` },
     SourceFile { path: "/main.do", source: `
 import { JsonEligibilityCache, read } from "./cache"
@@ -62,7 +62,7 @@ export function check(key: string): bool {
 }
 export function captured(): bool {
   values: Map<string, bool> := { ready: false }
-  readValue := (): bool => try! values.get("ready")
+  readValue := (): bool => values.get("ready")!
   values.set("ready", true)
   return readValue()
 }
@@ -72,13 +72,13 @@ export function nullable(): int {
 }
 export function readonlyRead(): bool {
   readonly values: Map<string, bool> = { ready: true }
-  return values.size == 1 && values.has("ready") && (try! values.get("ready"))
+  return values.size == 1 && values.has("ready") && (values.get("ready")!)
 }
 export function nestedArrays(): bool {
   values: Map<string, bool>[][] := [[make()]]
   alias := values[0][0]
   alias.set("first", false)
-  return !(try! values[0][0].get("first"))
+  return !(values[0][0].get("first")!)
 }
 function unused(values: Map<string, bool>[][]): none {}
 ` },
@@ -103,9 +103,9 @@ export function grow(length: int): bool {
   if alias.size != length { return false }
   for i of 0..<length {
     key := "key-" + string(i)
-    if !alias.has(key) || (try! alias.get(key)) != (i % 2 == 0) { return false }
+    if !alias.has(key) || (alias.get(key)!) != (i % 2 == 0) { return false }
     alias.set(key, i % 2 != 0)
-    if (try! values.get(key)) != (i % 2 != 0) { return false }
+    if (values.get(key)!) != (i % 2 != 0) { return false }
   }
   if values.size != length || values.has("missing") { return false }
   case values.get("missing") {
@@ -136,7 +136,7 @@ export function testMissingMapForcedUnwrapCapturesPanicAndReleasesCache(): none 
 function fail(): bool {
   values: Map<string, bool> := {}
   values.set("owned key", true)
-  return try! values.get("missing")
+  return values.get("missing")!
 }
 export function captured(): string {
   case catchPanic(=> fail()) {
@@ -147,8 +147,8 @@ export function captured(): string {
 export function escaped(): bool => fail()
 ` }], `
 for(let i=0;i<20;i++) {
-  assert.strictEqual(api.captured(),'Result forced unwrap failed');
-  assert.throws(()=>api.escaped(),/Result forced unwrap failed/);
+  assert.strictEqual(api.captured(),'/main.do:5: forced unwrap failed: Map key not found');
+  assert.throws(()=>api.escaped(),/forced unwrap failed: Map key not found/);
   assert.deepStrictEqual(live(),baseline,'failed unwrap releases map, keys, and Result');
 }
 `, WasmLoweringOptions { boxImmutableStructs: true, synchronousAsync: true })

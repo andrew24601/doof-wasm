@@ -23,8 +23,8 @@ export function classify(value: int): int {
     }
 }
 
-export function unwrapOrMinusOne(value: int | none): int {
-    present := value else {
+export function unwrapOrMinusOne(value: int): int {
+    present := maybePositive(value) else {
         return -1
     }
     return present

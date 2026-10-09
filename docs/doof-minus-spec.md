@@ -173,6 +173,7 @@ Supported instructions are:
 | `%r:bool = eq/lt %a, %b` | Matching numeric operands; `eq` also accepts `bool`, `char`, `none`, enums, references, and `any`; `lt` also accepts `char` |
 | `%r:T = convert %a` | Numeric conversion; integer-backed enums and `char` may also convert to numeric types |
 | `%r:T = copy %a` | Copy a value; retains references |
+| `drop %a` | End a scoped reference root and clear its local; escaping values must own a separate snapshot before this instruction |
 | `%r:C = new C(%a, ...)` | Allocate a class; arguments follow field order |
 | `%r:int = array-alloc %length, T` | Allocate an array-data block with `length` elements of type `T` |
 | `array-free %handle[, T]` | Release reference elements when `T` is a class, interface, or `any`, then return the block to the allocator |

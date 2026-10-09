@@ -1,28 +1,14 @@
-import { MinusBlock, MinusFunction, MinusInstruction, MinusModule, MinusValue, minusModuleLookup, lookupMinusName } from "./minus-ir"
+import { MinusBlock, MinusFunction, MinusInstruction, MinusModule, MinusValue, MinusNameIndex, minusModuleLookup, createMinusNameIndex, insertMinusName, lookupMinusName } from "./minus-ir"
 import { minusBlocks, minusBranchSplit, analyzeMinusControlFlow } from "./minus-control-flow"
 
 export class MinusValues {
     values: MinusValue[] = []
-    heads: int[] = []
-    links: int[] = []
-}
-
-// Generated names share long prefixes (encoded module paths) and differ near
-// the end, so hash the length and at most the last 24 characters.
-function nameHash(name: string): int {
-    let hash = name.length
-    start := if name.length > 24 then name.length - 24 else 0
-    for index of start..<name.length { hash = (hash * 31 + int(name[index])) % 65521 }
-    return hash
+    names: MinusNameIndex = MinusNameIndex {}
 }
 
 export function indexMinusValues(values: MinusValue[]): MinusValues {
-    table := MinusValues { values }
-    for _ of 0..<(values.length * 2 + 1) { table.heads.push(-1) }
-    for index of 0..<values.length {
-        bucket := nameHash(values[index].name) % table.heads.length
-        table.links.push(table.heads[bucket]); table.heads[bucket] = index
-    }
+    table := MinusValues { values, names: createMinusNameIndex(values.length) }
+    for value of values { _ := insertMinusName(table.names, value.name) }
     return table
 }
 
@@ -36,14 +22,7 @@ export function minusValues(function_: MinusFunction): MinusValues {
     return indexMinusValues(values)
 }
 
-export function minusValueId(table: MinusValues, name: string): int {
-    let index = table.heads[nameHash(name) % table.heads.length]
-    while index >= 0 {
-        if table.values[index].name == name { return index }
-        index = table.links[index]
-    }
-    return -1
-}
+export function minusValueId(table: MinusValues, name: string): int => lookupMinusName(table.names, name)
 
 export function minusReferenceType(module_: MinusModule, typeName: string): bool {
     if typeName == "any" { return true }
@@ -134,9 +113,9 @@ export function reachableMinusFunctions(module_: MinusModule): bool[] {
  * effects: they never free storage that another owner still roots. */
 export class MinusEffects {
     enabled: bool = false
-    functions: MinusValues = MinusValues {}
-    interfaces: MinusValues = MinusValues {}
-    classes: MinusValues = MinusValues {}
+    functions: MinusNameIndex = MinusNameIndex {}
+    interfaces: MinusNameIndex = MinusNameIndex {}
+    classes: MinusNameIndex = MinusNameIndex {}
     states: int[] = []
     peekable: bool[] = []
     // Whether custom destructors make reference lifetimes observable; the
@@ -144,25 +123,19 @@ export class MinusEffects {
     let preserve: bool = false
 }
 
-function namedTable(names: string[]): MinusValues {
-    let values: MinusValue[] = []
-    for name of names { values.push(MinusValue { name, typeName: "" }) }
-    return indexMinusValues(values)
-}
-
-export function minusIsInterface(effects: MinusEffects, typeName: string): bool => minusValueId(effects.interfaces, typeName) >= 0
+export function minusIsInterface(effects: MinusEffects, typeName: string): bool => lookupMinusName(effects.interfaces, typeName) >= 0
 
 /** Target function index of a direct call, -1 for dynamic dispatch, -2 for
  * no call, and -3 for a host import (which only sees its arguments). */
 export function minusCallTarget(effects: MinusEffects, table: MinusValues, instruction: MinusInstruction): int {
     if instruction.op == "call" {
-        target := minusValueId(effects.functions, instruction.args[0])
+        target := lookupMinusName(effects.functions, instruction.args[0])
         return if target >= 0 then target else -3
     }
     if instruction.op != "call-method" { return -2 }
     owner := table.values[minusValueId(table, instruction.args[0])].typeName
     if minusIsInterface(effects, owner) { return -1 }
-    return minusValueId(effects.functions, owner + "." + instruction.args[1])
+    return lookupMinusName(effects.functions, owner + "." + instruction.args[1])
 }
 
 function mutation(op: string): bool {
@@ -188,7 +161,7 @@ function freshResult(module_: MinusModule, effects: MinusEffects, table: MinusVa
     }
     if op == "new" {
         // An array object is fresh only when its storage handle is.
-        class_ := minusValueId(effects.classes, instruction.args[0])
+        class_ := lookupMinusName(effects.classes, instruction.args[0])
         if class_ < 0 { return true }
         fields := module_.classes[class_].fields
         for index of 0..<fields.length {
@@ -206,12 +179,11 @@ function freshResult(module_: MinusModule, effects: MinusEffects, table: MinusVa
 export function minusFreshValues(module_: MinusModule, effects: MinusEffects, table: MinusValues, blocks: MinusBlock[]): bool[] {
     let fresh: bool[] = []
     for _ of table.values { fresh.push(false) }
-    let blockNames: string[] = []
+    blockNames := createMinusNameIndex(blocks.length)
     for block_ of blocks {
-        blockNames.push(block_.name)
+        _ := insertMinusName(blockNames, block_.name)
         for param of block_.params { fresh[minusValueId(table, param.name)] = true }
     }
-    blockTable := namedTable(blockNames)
     let changed = true
     while changed {
         changed = false
@@ -241,7 +213,7 @@ export function minusFreshValues(module_: MinusModule, effects: MinusEffects, ta
                 }
                 let cursor = 0
                 while cursor < ranges.length {
-                    target := blocks[minusValueId(blockTable, instruction.args[ranges[cursor]])]
+                    target := blocks[lookupMinusName(blockNames, instruction.args[ranges[cursor]])]
                     for index of ranges[cursor + 1]..<ranges[cursor + 2] {
                         param := minusValueId(table, target.params[index - ranges[cursor + 1]].name)
                         if fresh[param] && !fresh[minusValueId(table, instruction.args[index])] { fresh[param] = false; changed = true }
@@ -304,13 +276,8 @@ function storageKind(table: MinusValues, fresh: bool[], owned: bool[], name: str
 }
 
 export function analyzeMinusEffects(module_: MinusModule, live: bool[]): MinusEffects {
-    let names: string[] = []
-    for function_ of module_.functions { names.push(function_.name) }
-    let interfaceNames: string[] = []
-    for interface_ of module_.interfaces { interfaceNames.push(interface_.name) }
-    let classNames: string[] = []
-    for class_ of module_.classes { classNames.push(class_.name) }
-    effects := MinusEffects { enabled: true, functions: namedTable(names), interfaces: namedTable(interfaceNames), classes: namedTable(classNames) }
+    lookup := minusModuleLookup(module_)
+    effects := MinusEffects { enabled: true, functions: lookup.functions, interfaces: lookup.interfaces, classes: lookup.classes }
     // Summaries: the strongest direct write, plus each call's target and the
     // storage kind of the argument a receiver-only target may write.
     let direct: int[] = []

@@ -32,7 +32,7 @@ export function testDeclarationLookupsRefreshForEveryDeclarationList(): none {
     Assert.equal(lookupMinusName(minusModuleLookup(module_).functions, "Function"), 0)
     module_.imports.push(MinusImport { name: "Import", importModule: "host", importName: "import", result: "none" })
     Assert.equal(lookupMinusName(minusModuleLookup(module_).imports, "Import"), 0)
-    _ := try! module_.classes.pop()
+    _ := module_.classes.pop()!
     Assert.equal(lookupMinusName(minusModuleLookup(module_).classes, "Class"), -1)
     Assert.equal(lookupMinusName(minusModuleLookup(module_).imports, "Import"), 0)
 }

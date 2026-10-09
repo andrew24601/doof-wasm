@@ -13,13 +13,13 @@ export class WasmInstruction {
     doubleValue: double = 0.0
 }
 
-function unsigned(bytes: int[], value: int): none {
+export function unsigned(bytes: int[], value: int): none {
     let remaining = value
     while remaining >= 128 { bytes.push(remaining % 128 + 128); remaining = remaining \ 128 }
     bytes.push(remaining)
 }
 
-function signed(bytes: int[], value: long): none {
+export function signed(bytes: int[], value: long): none {
     let remaining = value
     while true {
         let next = remaining \ 128L

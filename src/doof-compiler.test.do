@@ -11,28 +11,28 @@ import { renderDoofJs } from "./minus-js"
 
 function runWasm(bytes: byte[], name: string, script: string): none {
   path := "/tmp/doof-wasm-arrays-" + string(pid()) + "-" + name + ".wasm"
-  try! writeBlob(path, bytes.cloneReadonly())
-  result := try! run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
+  writeBlob(path, bytes.cloneReadonly())!
+  result := run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
   _ := remove(path) else { panic("Could not remove temporary Wasm file") }
   if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
   Assert.equal(result.exitCode, 0)
 }
 
 function runSourceWithBindings(source: string, name: string, script: string): none {
-  module_ := try! lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
-  bytes := try! encodeDoofMinus(module_, true)
+  module_ := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")!
+  bytes := encodeDoofMinus(module_, true)!
   wasmPath := "/tmp/doof-source-arrays-" + string(pid()) + "-" + name + ".wasm"
   jsPath := "/tmp/doof-source-arrays-" + string(pid()) + "-" + name + ".mjs"
-  try! writeBlob(wasmPath, bytes.cloneReadonly())
-  try! writeText(jsPath, renderDoofJs(module_, true))
-  result := try! run("node", ["-e", `
+  writeBlob(wasmPath, bytes.cloneReadonly())!
+  writeText(jsPath, renderDoofJs(module_, true))!
+  result := run("node", ["-e", `
 const fs = require('fs'), assert = require('assert'), {pathToFileURL} = require('url');
 (async () => {
   const ffi = await import(pathToFileURL(process.argv[2]).href);
   const bytes = fs.readFileSync(process.argv[1]);
   ${script}
 })().catch(error => { console.error(error); process.exit(1); });
-`, wasmPath, jsPath], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
+`, wasmPath, jsPath], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
   _ := remove(wasmPath) else { panic("Could not remove temporary Wasm file") }
   _ := remove(jsPath) else { panic("Could not remove temporary JavaScript file") }
   if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
@@ -59,12 +59,12 @@ export function testHostStringImportsAndGeneratedBindingsEndToEnd(): none {
     success: Success<MinusModule> -> { module_ = success.value }
     failure: Failure<string> -> { panic(failure.error) }
   }
-  bytes := try! encodeDoofMinus(module_!, true)
+  bytes := encodeDoofMinus(module_!, true)!
   wasmPath := "/tmp/doof-host-ffi-" + string(pid()) + ".wasm"
   jsPath := "/tmp/doof-host-ffi-" + string(pid()) + ".mjs"
-  try! writeBlob(wasmPath, bytes.cloneReadonly())
-  try! writeText(jsPath, renderDoofJs(module_!, true))
-  result := try! run("node", ["-e", `const fs=require('fs');const {pathToFileURL}=require('url');(async()=>{const ffi=await import(pathToFileURL(process.argv[2]).href);let printed='';let debug=null;const host=ffi.createDoofImports({println:value=>{printed=value;const heap=debug.dumpHeap();if(!heap.some(block=>block.kind==='string'&&block.value===value)||!heap.some(block=>block.kind==='char-array'&&block.value===value)||!heap.some(block=>block.kind==='array-data'&&block.length===value.length))throw new Error('idiomatic string/array heap view missing')},echo:value=>value+'!'});const {instance}=await WebAssembly.instantiate(fs.readFileSync(process.argv[1]),host.imports);host.attach(instance);debug=ffi.createDoofHeapInspector(instance);const api=ffi.createDoofModule(instance);if(api.callHost('hello')!=='hello!'||api.literal()!=='ready'||printed!=='hello')process.exit(1)})().catch(error=>{console.error(error);process.exit(2)});`, wasmPath, jsPath], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
+  writeBlob(wasmPath, bytes.cloneReadonly())!
+  writeText(jsPath, renderDoofJs(module_!, true))!
+  result := run("node", ["-e", `const fs=require('fs');const {pathToFileURL}=require('url');(async()=>{const ffi=await import(pathToFileURL(process.argv[2]).href);let printed='';let debug=null;const host=ffi.createDoofImports({println:value=>{printed=value;const heap=debug.dumpHeap();if(!heap.some(block=>block.kind==='string'&&block.value===value)||!heap.some(block=>block.kind==='char-array'&&block.value===value)||!heap.some(block=>block.kind==='array-data'&&block.length===value.length))throw new Error('idiomatic string/array heap view missing')},echo:value=>value+'!'});const {instance}=await WebAssembly.instantiate(fs.readFileSync(process.argv[1]),host.imports);host.attach(instance);debug=ffi.createDoofHeapInspector(instance);const api=ffi.createDoofModule(instance);if(api.callHost('hello')!=='hello!'||api.literal()!=='ready'||printed!=='hello')process.exit(1)})().catch(error=>{console.error(error);process.exit(2)});`, wasmPath, jsPath], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
   _ := remove(wasmPath) else { panic("Could not remove temporary Wasm file") }
   _ := remove(jsPath) else { panic("Could not remove temporary JavaScript file") }
   if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
@@ -73,7 +73,7 @@ export function testHostStringImportsAndGeneratedBindingsEndToEnd(): none {
 
 export function testLowersImportedModulesAndDisambiguatesNames(): none {
   result := lowerDoofWasmSources([
-    SourceFile { path: "/main.do", source: "import { same as first, Item as First } from \"./one\"\nimport { same as second, Item as Second } from \"./two\"\nfunction useFirst(value: First): First => value\nfunction useSecond(value: Second): Second => value\nexport function main(): int => first() + second()" },
+    SourceFile { path: "/main.do", source: "import { same as first, Item as First } from \"./one\"\nimport { same as second, Item as Second } from \"./two\"\nfunction useFirst(value: First): First => value\nfunction useSecond(value: Second): Second => value\nexport function run(): int => first() + second()" },
     SourceFile { path: "/one.do", source: "export class Item { value: int }\nexport function same(): int => 1" },
     SourceFile { path: "/two.do", source: "export class Item { value: int }\nexport function same(): int => 2" },
   ], "/main.do")
@@ -81,7 +81,7 @@ export function testLowersImportedModulesAndDisambiguatesNames(): none {
     success: Success<MinusModule> -> {
       Assert.equal(success.value.functions.length, 5)
       Assert.equal(success.value.functions[2].exported, true)
-      Assert.equal(success.value.functions[2].exportName, "main")
+      Assert.equal(success.value.functions[2].exportName, "run")
       Assert.equal(success.value.functions[3].name == success.value.functions[4].name, false)
       Assert.equal(success.value.functions[3].exported || success.value.functions[4].exported, false)
       Assert.equal(success.value.functions[0].sourcePath, "/main.do")
@@ -98,7 +98,7 @@ export function testLowersImportedModulesAndDisambiguatesNames(): none {
 
 export function testCompilesImportedFunctionGraph(): none {
   result := compileDoofWasmSources([
-    SourceFile { path: "/main.do", source: "import { answer } from \"./lib\"\nexport function main(): int => answer()" },
+    SourceFile { path: "/main.do", source: "import { answer } from \"./lib\"\nexport function run(): int => answer()" },
     SourceFile { path: "/lib.do", source: "export function answer(): int => 42" },
   ], "/main.do")
   case result {
@@ -110,7 +110,7 @@ export function testCompilesImportedFunctionGraph(): none {
 export function testLowersAndExecutesResultArmsAsDoofMinusClasses(): none {
   source := "export function successValue(): int { result: Result<int, int> := Success { value: 40 }\ncase result { value: Success<int> -> { return value.value }, error: Failure<int> -> { return error.error } } }\n" +
     "export function failureValue(): int { result: Result<int, int> := Failure { error: 2 }\ncase result { value: Success<int> -> { return value.value }, error: Failure<int> -> { return error.error } } }\n" +
-    "export function main(): int => successValue() + failureValue()"
+    "export function run(): int => successValue() + failureValue()"
   lowered := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
   case lowered {
     success: Success<MinusModule> -> {
@@ -123,13 +123,13 @@ export function testLowersAndExecutesResultArmsAsDoofMinusClasses(): none {
     }
     failure: Failure<string> -> { panic(failure.error) }
   }
-  bytes := try! compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
-  runWasm(bytes, "result-arms", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.successValue()!==40||e.failureValue()!==2||e.main()!==42)throw new Error("Result arm lowering returned the wrong payload")`)
+  bytes := compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")!
+  runWasm(bytes, "result-arms", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.successValue()!==40||e.failureValue()!==2||e.run()!==42)throw new Error("Result arm lowering returned the wrong payload")`)
 }
 
 export function testLowersAndExecutesClosureWithImmutableCapture(): none {
   source := "function makeAdder(base: int): (value: int): int => (value: int): int => base + value\n" +
-    "export function main(): int { add := makeAdder(40)\nreturn add(2) }"
+    "export function run(): int { add := makeAdder(40)\nreturn add(2) }"
   lowered := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
   case lowered {
     success: Success<MinusModule> -> {
@@ -142,21 +142,21 @@ export function testLowersAndExecutesClosureWithImmutableCapture(): none {
     }
     failure: Failure<string> -> { panic(failure.error) }
   }
-  bytes := try! compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
-  runWasm(bytes, "closure-capture", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.main()!==42)throw new Error("Captured closure returned the wrong value")`)
+  bytes := compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")!
+  runWasm(bytes, "closure-capture", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.run()!==42)throw new Error("Captured closure returned the wrong value")`)
 }
 
 export function testLowersAndExecutesEscapingClosureWithReferenceCapture(): none {
   source := "class Box { value: int }\n" +
     "function makeReader(): (): int { box := Box { value: 42 }\nreturn (): int => box.value }\n" +
-    "export function main(): int { read := makeReader()\nreturn read() }"
-  bytes := try! compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
-  runWasm(bytes, "closure-reference-capture", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.main()!==42)throw new Error("Escaping closure lost its captured object")`)
+    "export function run(): int { read := makeReader()\nreturn read() }"
+  bytes := compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")!
+  runWasm(bytes, "closure-reference-capture", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.run()!==42)throw new Error("Escaping closure lost its captured object")`)
 }
 
 export function testLowersTwoArgumentStringClosureSignature(): none {
   source := "function makeText(text: string): (left: int, right: int): string => (left: int, right: int): string => text\n" +
-    "export function main(): int { callback := makeText(\"ready\")\nresult := callback(1, 2)\nreturn result.length }"
+    "export function run(): int { callback := makeText(\"ready\")\nresult := callback(1, 2)\nreturn result.length }"
   lowered := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
   case lowered {
     success: Success<MinusModule> -> {
@@ -166,12 +166,12 @@ export function testLowersTwoArgumentStringClosureSignature(): none {
     }
     failure: Failure<string> -> { panic(failure.error) }
   }
-  bytes := try! compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
-  runWasm(bytes, "closure-signature", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.main()!==5)throw new Error("Two argument string closure returned the wrong value")`)
+  bytes := compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")!
+  runWasm(bytes, "closure-signature", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.run()!==5)throw new Error("Two argument string closure returned the wrong value")`)
 }
 
 export function testLowersMutableClosureCapture(): none {
-  source := "export function main(): int { let value = 40\nstep := (): int => { value = value + 1\nreturn value }\nvalue = 50\ninside := step()\nreturn value + inside }"
+  source := "export function run(): int { let value = 40\nstep := (): int => { value = value + 1\nreturn value }\nvalue = 50\ninside := step()\nreturn value + inside }"
   result := lowerDoofWasmSources([
     SourceFile { path: "/main.do", source },
   ], "/main.do")
@@ -195,13 +195,13 @@ export function testLowersMutableClosureCapture(): none {
     }
     failure: Failure<string> -> { panic(failure.error) }
   }
-  bytes := try! compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
-  runWasm(bytes, "mutable-closure-capture", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.main()!==102)throw new Error("Mutable closure capture did not share its boxed value")`)
+  bytes := compileDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")!
+  runWasm(bytes, "mutable-closure-capture", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;if(e.run()!==102)throw new Error("Mutable closure capture did not share its boxed value")`)
 }
 
 export function testLowersImportedIntegerEnums(): none {
   result := lowerDoofWasmSources([
-    SourceFile { path: "/main.do", source: "import { Kind, getKind } from \"./kinds\"\nexport function main(): int => getKind().value" },
+    SourceFile { path: "/main.do", source: "import { Kind, getKind } from \"./kinds\"\nexport function run(): int => getKind().value" },
     SourceFile { path: "/kinds.do", source: "export enum Kind { First = 2, Last = 9 }\nexport function getKind(): Kind => Kind.Last\nexport function isKind(value: int | Kind | none): bool { case value { _: Kind -> { return true }, _: int -> { return false }, none -> { return false } } }" },
   ], "/main.do")
   case result {
@@ -225,7 +225,7 @@ export function testLowersImportedIntegerEnums(): none {
 
 export function testLowersByteArrayToOnDemandWrapperAndTypedOperations(): none {
   result := lowerDoofWasmSources([
-    SourceFile { path: "/main.do", source: "export function main(): int { values: byte[] := [1, 2, 255]\nvalues[1] = 9\nreturn int(values[0]) + int(values[1]) + int(values[2]) + values.length }" },
+    SourceFile { path: "/main.do", source: "export function run(): int { values: byte[] := [1, 2, 255]\nvalues[1] = 9\nreturn int(values[0]) + int(values[1]) + int(values[2]) + values.length }" },
   ], "/main.do")
   case result {
     success: Success<MinusModule> -> {
@@ -257,10 +257,10 @@ export function testLowersByteArrayToOnDemandWrapperAndTypedOperations(): none {
 }
 
 export function testExecutesByteArrayReadsWritesBoundsAndFinalRelease(): none {
-  bytes := try! compileDoofWasmSources([
-    SourceFile { path: "/main.do", source: "export function main(): int { values: byte[] := [1, 2, 255]\nvalues[1] = 9\nreturn int(values[0]) + int(values[1]) + int(values[2]) + values.length }\nexport function bounds(): int { values: byte[] := [7]\nreturn int(values[2]) }" },
-  ], "/main.do")
-  runWasm(bytes, "byte-array", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;for(let i=0;i<1000;i++)if(e.main()!==268)process.exit(1);try{e.bounds();process.exit(2)}catch(x){if(!(x instanceof WebAssembly.RuntimeError))process.exit(3)}`)
+  bytes := compileDoofWasmSources([
+    SourceFile { path: "/main.do", source: "export function run(): int { values: byte[] := [1, 2, 255]\nvalues[1] = 9\nreturn int(values[0]) + int(values[1]) + int(values[2]) + values.length }\nexport function bounds(): int { values: byte[] := [7]\nreturn int(values[2]) }" },
+  ], "/main.do")!
+  runWasm(bytes, "byte-array", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;for(let i=0;i<1000;i++)if(e.run()!==268)process.exit(1);try{e.bounds();process.exit(2)}catch(x){if(!(x instanceof WebAssembly.RuntimeError))process.exit(3)}`)
 }
 
 export function testArraySourceChunkingAndPrimitiveAndEnumElements(): none {
@@ -276,10 +276,10 @@ export function testArraySourceChunkingAndPrimitiveAndEnumElements(): none {
     failure: Failure<string> -> { Assert.fail("Expected an oversized byte[] literal to lower: " + failure.error) }
     _ -> { }
   }
-  bytes := try! compileDoofWasmSources([
-    SourceFile { path: "/main.do", source: "enum Kind { First = 2, Last = 9 }\nexport function primitivePart(): int { values: int[] := [1, 2, 3]\nvalues[1] = 7\nreturn values[0] + values[1] + values[2] + values.length }\nexport function enumPart(): int { kinds: Kind[] := [Kind.First, Kind.Last]\nkinds[0] = Kind.Last\nreturn kinds[0].value + kinds[1].value + kinds.length }\nexport function main(): int { return primitivePart() + enumPart() }" },
-  ], "/main.do")
-  runWasm(bytes, "primitive-enum-arrays", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;const actual=e.main();if(actual!==34)throw new Error("expected 34, got "+actual)`)
+  bytes := compileDoofWasmSources([
+    SourceFile { path: "/main.do", source: "enum Kind { First = 2, Last = 9 }\nexport function primitivePart(): int { values: int[] := [1, 2, 3]\nvalues[1] = 7\nreturn values[0] + values[1] + values[2] + values.length }\nexport function enumPart(): int { kinds: Kind[] := [Kind.First, Kind.Last]\nkinds[0] = Kind.Last\nreturn kinds[0].value + kinds[1].value + kinds.length }\nexport function run(): int { return primitivePart() + enumPart() }" },
+  ], "/main.do")!
+  runWasm(bytes, "primitive-enum-arrays", `const fs=require("fs");const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;const actual=e.run();if(actual!==34)throw new Error("expected 34, got "+actual)`)
 }
 
 export function testSourceArraysAllSupportedWidthsThroughBindingsAndDestruction(): none {
@@ -439,19 +439,19 @@ if (api.unionNone) { assert.strictEqual(api.unionNone(),-2); assert.deepStrictEq
 }
 
 export function testOptionalArrayOwnerCallsAndCoalescing(): none {
-  bytes := try! compileDoofWasmSources([SourceFile { path: "/main.do", source: `
+  bytes := compileDoofWasmSources([SourceFile { path: "/main.do", source: `
 class Box { values: int[]
   value: int
   count(): int => this.values.length }
 function count(box: Box | none): int => box?.count() ?? 0
 function value(box: Box | none): int => box?.value ?? 0
-export function main(): int {
+export function run(): int {
   box := Box { values: [7, 8], value: 7 }
   return count(box) + count(none) + value(box) + value(none)
 }
 
-` }], "/main.do")
-  runWasm(bytes, "optional-array-owner", `const e=new WebAssembly.Instance(new WebAssembly.Module(require('fs').readFileSync(process.argv[1]))).exports;require('assert').strictEqual(e.main(),9);`)
+` }], "/main.do")!
+  runWasm(bytes, "optional-array-owner", `const e=new WebAssembly.Instance(new WebAssembly.Module(require('fs').readFileSync(process.argv[1]))).exports;require('assert').strictEqual(e.run(),9);`)
 }
 
 export function testSourceCompilationArtifactsShareOneLoadedGraph(): none {
@@ -463,10 +463,10 @@ export function testSourceCompilationArtifactsShareOneLoadedGraph(): none {
   }
   source := "import { answer } from \"./answer\"\nexport function check(): int => answer()"
   sources := [SourceFile { path: "/main.do", source }]
-  artifacts := try! compileDoofWasmSourcesWithBindings(sources, "/main.do", loader, true)
+  artifacts := compileDoofWasmSourcesWithBindings(sources, "/main.do", loader, true)!
   Assert.equal(loads, 1)
-  expected := try! lowerDoofWasmSources(sources, "/main.do", loader)
-  expectedBytes := try! encodeDoofMinus(expected, true)
+  expected := lowerDoofWasmSources(sources, "/main.do", loader)!
+  expectedBytes := encodeDoofMinus(expected, true)!
   Assert.arrayEqual(artifacts.bytes.cloneReadonly(), expectedBytes.cloneReadonly())
   Assert.equal(artifacts.bindings, renderDoofJs(expected, true))
   runWasm(artifacts.bytes, "artifacts", `

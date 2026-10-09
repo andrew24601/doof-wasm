@@ -1,12 +1,9 @@
-import { createMinusFunction } from "./minus-build"
+import { createMinusFunction, instruction, value } from "./minus-build"
 import { minusBlocks } from "./minus-control-flow"
 // Synthesized string construction used by compiler diagnostics and source tokenization.
 import { STRING_CLASS, CHAR_ARRAY_CLASS, arrayClassName } from "./doof-lowering-constants"
 import { MinusModule, MinusFunction, MinusBlock, MinusValue, MinusInstruction } from "./minus-ir"
 import { MinusValues, minusValues, minusValueId, minusOperandPositions } from "./minus-analysis"
-
-function value(name: string, typeName: string): MinusValue => MinusValue { name, typeName }
-function instruction(op: string, args: string[], name: string = "", typeName: string = "none"): MinusInstruction => MinusInstruction { op, args, result: if name == "" then none else value(name, typeName) }
 
 function uses(module_: MinusModule, target: string): bool {
   for fn of module_.functions {
@@ -304,7 +301,7 @@ function flattenBlock(block_: MinusBlock, table: MinusValues, uses: int[], ariti
       group += 1
     }
   }
-  while block_.instructions.length > 0 { _ := try! block_.instructions.pop() }
+  while block_.instructions.length > 0 { _ := block_.instructions.pop()! }
   for instruction_ of rebuilt { block_.instructions.push(instruction_) }
 }
 

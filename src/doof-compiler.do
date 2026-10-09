@@ -11,7 +11,6 @@ import { SourceConstant, annotationName, SourceNameCache } from "./doof-lowering
 import { lowerDoofProgram } from "./doof-lowering"
 import { flattenStringConcats } from "./doof-lowering-strings"
 import { MinusModule } from "./minus-ir"
-import { renderDoofMinus } from "./minus-render"
 import { renderDoofJs } from "./minus-js"
 import { WasmLoweringOptions } from "./doof-lowering-options"
 export { WasmLoweringOptions } from "./doof-lowering-options"
@@ -115,12 +114,6 @@ function lowerAnalysis(frontend: FrontendResult, entry: string, options: WasmLow
 /** Lower one in-memory Doof source file directly to a validated doof-- model. */
 export function lowerDoofWasmSource(source: string, options: WasmLoweringOptions = WasmLoweringOptions {}): Result<MinusModule, string> {
   return lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do", noSourceLoader, options)
-}
-
-/** Render the validated doof-- model for compiler debugging. */
-export function dumpDoofWasmMinus(source: string, options: WasmLoweringOptions = WasmLoweringOptions {}): Result<string, string> {
-  try module_ := lowerDoofWasmSource(source, options)
-  return Success(renderDoofMinus(module_))
 }
 
 /** Compile one in-memory Doof source file directly to WebAssembly. */

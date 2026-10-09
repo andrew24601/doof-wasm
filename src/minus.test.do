@@ -75,11 +75,11 @@ array-copy %a, %zero, %b, %zero, %n, byte
 %compared:int = array-compare %a, %b
 return %compared
 end`
-    module_ := try! parseDoofMinus(source)
-    try! validateDoofMinus(module_)
+    module_ := parseDoofMinus(source)!
+    validateDoofMinus(module_)!
     rendered := renderDoofMinus(module_)
-    Assert.equal(renderDoofMinus(try! parseDoofMinus(rendered)), rendered)
-    _ := try! encodeDoofMinus(module_)
+    Assert.equal(renderDoofMinus(parseDoofMinus(rendered)!), rendered)
+    _ := encodeDoofMinus(module_)!
     Assert.equal(renderDoofMinus(module_), rendered)
     for bad of [
         "array-copy %a, %zero, %b, %zero, %n, any",
@@ -87,7 +87,7 @@ end`
         "array-copy %a, %zero, %b, %zero, %n",
         "array-copy %a, %zero, %b, %zero, %n, unknown",
     ] {
-        case validateDoofMinus(try! parseDoofMinus(source.replaceAll("array-copy %a, %zero, %b, %zero, %n, byte", bad))) {
+        case validateDoofMinus(parseDoofMinus(source.replaceAll("array-copy %a, %zero, %b, %zero, %n, byte", bad))!) {
             failure: Failure<string> -> { Assert.isTrue(failure.error.contains("array-copy")) }
             _ -> { Assert.fail("invalid bulk array copy must fail") }
         }
@@ -95,14 +95,14 @@ end`
 }
 
 export function testInstructionValidationRetainsSourcePath(): none {
-    module_ := try! parseDoofMinus(`func check() -> bool
+    module_ := parseDoofMinus(`func check() -> bool
 block entry
 %left:int = const 1
 %right:long = const 1
 %same:bool = eq %left, %right
 return %same
 end
-`)
+`)!
     original := minusBlocks(module_.functions[0])[0].instructions[2]
     minusBlocks(module_.functions[0])[0].instructions[2] = MinusInstruction {
         op: original.op, args: original.args, result: original.result, line: original.line, sourcePath: "/src/input.do",
@@ -137,7 +137,7 @@ block entry
 return %value
 end
 `
-    parsed := try! parseDoofMinus(source)
+    parsed := parseDoofMinus(source)!
     Assert.equal(renderDoofMinus(parsed), source)
     runWasm(source, "globals", `const fs=require('fs'),assert=require('assert');
 WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(({instance})=>{
@@ -170,10 +170,10 @@ end`, "global-get result needs int")
 }
 
 function runWasm(source: string, testName: string, script: string, debugHeap: bool = false): none {
-    bytes := try! compileDoofMinus(source, debugHeap)
+    bytes := compileDoofMinus(source, debugHeap)!
     path := "/tmp/doof-minus-" + string(pid()) + "-" + testName + ".wasm"
-    try! writeBlob(path, bytes.cloneReadonly())
-    result := try! run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
+    writeBlob(path, bytes.cloneReadonly())!
+    result := run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
     _ := remove(path) else { panic("Could not remove temporary Wasm file") }
     if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
     Assert.equal(result.exitCode, 0)
@@ -210,12 +210,12 @@ function capMemoryAtOnePage(bytes: byte[]): byte[] {
 }
 
 function runCappedWasm(source: string, testName: string, script: string, imports: MinusImport[] = []): none {
-    module_ := try! parseDoofMinus(source)
+    module_ := parseDoofMinus(source)!
     for import_ of imports { module_.imports.push(import_) }
-    bytes := capMemoryAtOnePage(try! encodeDoofMinus(module_))
+    bytes := capMemoryAtOnePage(encodeDoofMinus(module_)!)
     path := "/tmp/doof-minus-" + string(pid()) + "-" + testName + ".wasm"
-    try! writeBlob(path, bytes.cloneReadonly())
-    result := try! run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
+    writeBlob(path, bytes.cloneReadonly())!
+    result := run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
     _ := remove(path) else { panic("Could not remove temporary Wasm file") }
     if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
     Assert.equal(result.exitCode, 0)
@@ -626,7 +626,7 @@ export function testArrayHelpersKeepRepeatedOperationsCompact(): none {
         source += "%read" + string(index) + ":int = array-get %data" + string(index) + ", %index\narray-free %data" + string(index) + "\n"
     }
     source += "return %read99\nend\n"
-    bytes := try! compileDoofMinus(source)
+    bytes := compileDoofMinus(source)!
     Assert.isTrue(bytes.length < 10000, "Array machinery must be shared across repeated operations")
     runCappedWasm(source, "compact-array-helpers", `
 const fs=require('fs'),assert=require('assert');
@@ -677,7 +677,7 @@ export function testHundredsOfUnusedBlockArgumentsEmitNoTransfers(): none {
         args += separator + "%wide"
     }
     source := "export func answer(%value:int) -> int\nscope done\nblock entry\n%wide:long = const 9007199254740993\njump done(" + args + ")\nend-scope\nblock done(" + params + ")\nreturn %value\nend\n"
-    Assert.isTrue((try! compileDoofMinus(source)).length < 1000, "Dead arguments should allocate no locals or transfer code")
+    Assert.isTrue((compileDoofMinus(source)!).length < 1000, "Dead arguments should allocate no locals or transfer code")
     runWasm(source, "dead-arguments-compact", `
 const fs=require('fs'),assert=require('assert');
 const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;

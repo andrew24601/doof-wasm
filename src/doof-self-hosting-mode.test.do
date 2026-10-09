@@ -10,11 +10,11 @@ import { renderDoofJs } from "./minus-js"
 
 function runSelfHostingSource(source: string, script: string, options: WasmLoweringOptions = WasmLoweringOptions { boxImmutableStructs: true, synchronousAsync: true }): none {
   module_ := lowerDoofWasmSource(source, options) else error { panic(error) }
-  bytes := try! encodeDoofMinus(module_, true)
+  bytes := encodeDoofMinus(module_, true)!
   base := "/tmp/doof-self-hosting-mode-" + string(pid())
-  try! writeBlob(base + ".wasm", bytes.cloneReadonly())
-  try! writeText(base + ".mjs", renderDoofJs(module_, true))
-  result := try! run("node", ["-e", `
+  writeBlob(base + ".wasm", bytes.cloneReadonly())!
+  writeText(base + ".mjs", renderDoofJs(module_, true))!
+  result := run("node", ["-e", `
 const fs=require('fs'),assert=require('assert'),{pathToFileURL}=require('url');
 (async()=>{
 const ffi=await import(pathToFileURL(process.argv[1]+'.mjs').href);
@@ -23,9 +23,9 @@ const api=ffi.createDoofModule(instance),heap=ffi.createDoofHeapInspector(instan
 const live=()=>heap.dumpHeap().filter(block=>block.kind!=='free').map(block=>[block.address,block.kind,block.refCount]);
 ${script}
 })().catch(error=>{console.error(error);process.exit(1)});
-`, base], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
-  try! remove(base + ".wasm")
-  try! remove(base + ".mjs")
+`, base], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
+  remove(base + ".wasm")!
+  remove(base + ".mjs")!
   if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
   Assert.equal(result.exitCode, 0)
 }
@@ -60,10 +60,10 @@ export function testSelfHostingModeAsyncIsOptInAndEager(): none {
 isolated function calculate(value: int): int => value + 1
 export function check(value: int): int {
   promise := async calculate(value)
-  first := try! promise.get()
-  second := try! promise.get()
+  first := promise.get()!
+  second := promise.get()!
   block := async { local := value + 2; yield local * 2 }
-  third := try! block.get()
+  third := block.get()!
   return first + second + third
 }
 `
@@ -92,9 +92,9 @@ export function queue(): string {
   pending.push(async fail(0))
   pending.push(async { yield 30 })
   alias := pending
-  first := try! pending.takeFirstCompleted()
+  first := pending.takeFirstCompleted()!
   second := pending.takeFirstCompleted() else error {
-    third := try! alias.takeFirstCompleted()
+    third := alias.takeFirstCompleted()!
     empty := pending.takeFirstCompleted() else missing {
       return string(first) + ":" + error + ":" + string(third) + ":" + string(alias.length) + ":" + missing
     }
@@ -122,9 +122,9 @@ function unit(): none { value := Value { text: "temporary" } }
 function fail(): int { value := Value { text: "temporary" }; if value.text.length > 0 { panic("escaped failure") } return 0 }
 export function check(): string {
   completed := async unit()
-  _ := try! completed.get()
-  nested := async { inner := async { yield Value { text: "nested" } }; yield try! inner.get() }
-  value := try! nested.get()
+  _ := completed.get()!
+  nested := async { inner := async { yield Value { text: "nested" } }; yield inner.get()! }
+  value := nested.get()!
   failed := async fail()
   first := failed.get() else message {
     second := failed.get() else repeated { return value.text + ":" + message + ":" + repeated }
@@ -169,7 +169,7 @@ block entry
 panic %message
 end
 `
-  parsed := try! parseDoofMinus(text)
+  parsed := parseDoofMinus(text)!
   Assert.equal(parsed.recoverPanics, true)
   Assert.equal(parsed.functions[0].capturePanics, true)
   Assert.equal(renderDoofMinus(parsed), text)
@@ -207,15 +207,45 @@ export function escaped(flag: bool): string {
 }
 `, `
 const baseline=live();for(let i=0;i<30;i++){
-assert.strictEqual(api.caught(false),'Nullable forced unwrap failed');
-assert.strictEqual(api.caught(true),'Nullable forced unwrap failed');
+assert.ok(api.caught(false).startsWith('/main.do:'));assert.match(api.caught(false),/forced unwrap failed/);
+assert.ok(api.caught(true).startsWith('/main.do:'));assert.match(api.caught(true),/forced unwrap failed/);
 assert.strictEqual(api.escaped(true),'first');
 assert.strictEqual(api.single(true),'first');
-assert.strictEqual(api.single(false),'Nullable forced unwrap failed');
-assert.strictEqual(api.writePanic(false),'Nullable forced unwrap failed');
+assert.match(api.single(false),/forced unwrap failed/);
+assert.match(api.writePanic(false),/forced unwrap failed/);
 assert.strictEqual(api.writePanic(true),'rhs');
-assert.throws(()=>api.escaped(false),/Nullable forced unwrap failed/);
+assert.throws(()=>api.escaped(false),/forced unwrap failed/);
 assert.deepStrictEqual(live(),baseline,'panic unwinds union receivers and caller references');
+}
+`)
+}
+
+export function testSelfHostingCaseYieldsStayInsideTheirValueScope(): none {
+  runSelfHostingSource(`
+export function check(value: bool): string {
+  job := async {
+    text := case value {
+      true -> { yield "case" + "!" }
+      false -> { let local <- { yield "block" + "!" }; yield local }
+    }
+    yield text + "done"
+  }
+  return job.get()!
+}
+export function caught(value: bool): string {
+  job := async {
+    items := ["temporary" + "!"]
+    text := case value { true -> items[0], false -> { panic("case failed") } }
+    yield text
+  }
+  result := job.get() else error { return error }
+  return result
+}
+`, `
+const baseline=live();for(let i=0;i<30;i++){
+assert.strictEqual(api.check(true),'case!done');assert.strictEqual(api.check(false),'block!done');
+assert.strictEqual(api.caught(true),'temporary!');assert.strictEqual(api.caught(false),'case failed');
+assert.deepStrictEqual(live(),baseline);
 }
 `)
 }

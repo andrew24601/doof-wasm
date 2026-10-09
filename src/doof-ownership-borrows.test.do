@@ -189,12 +189,12 @@ export function concats(): string {
   return both + empty + long + loop + text + empty
 }
 `
-  module_ := try! lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
-  bytes := try! encodeDoofMinus(module_, true)
+  module_ := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")!
+  bytes := encodeDoofMinus(module_, true)!
   path := "/tmp/doof-ownership-borrows-" + string(pid())
-  try! writeBlob(path + ".wasm", bytes.cloneReadonly())
-  try! writeText(path + ".mjs", renderDoofJs(module_, true))
-  result := try! run("node", ["-e", `
+  writeBlob(path + ".wasm", bytes.cloneReadonly())!
+  writeText(path + ".mjs", renderDoofJs(module_, true))!
+  result := run("node", ["-e", `
 const fs = require('fs'), assert = require('assert'), {pathToFileURL} = require('url');
 (async () => {
   const ffi = await import(pathToFileURL(process.argv[2]).href);
@@ -220,9 +220,9 @@ const fs = require('fs'), assert = require('assert'), {pathToFileURL} = require(
     assert.deepStrictEqual(live(), baseline, 'heap returns to baseline');
   }
 })().catch(error => { console.error(error); process.exit(1); });
-`, path + ".wasm", path + ".mjs"], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
-  try! remove(path + ".wasm")
-  try! remove(path + ".mjs")
+`, path + ".wasm", path + ".mjs"], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
+  remove(path + ".wasm")!
+  remove(path + ".mjs")!
   if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
   Assert.equal(result.exitCode, 0)
 }

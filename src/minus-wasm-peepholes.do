@@ -10,7 +10,7 @@ export function simplifyWasmInstructions(code: WasmInstruction[]): WasmInstructi
         instruction := code[index]
         opcode := instruction.opcode
         if opcode == 2 || opcode == 3 || opcode == 4 || opcode == 6 { labels.push(instruction) }
-        if opcode == 11 { _ := try! labels.pop() }
+        if opcode == 11 { _ := labels.pop()! }
         if opcode == 33 && index + 1 < code.length && code[index + 1].opcode == 32 && code[index + 1].immediate == instruction.immediate {
             result.push(WasmInstruction { opcode: 34, immediate: instruction.immediate })
             index += 2

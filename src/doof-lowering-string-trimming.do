@@ -1,10 +1,7 @@
-import { createMinusFunction } from "./minus-build"
+import { createMinusFunction, instruction, value } from "./minus-build"
 // Native whitespace trimming uses exactly space and ASCII codes 9 through 13.
 import { STRING_CLASS } from "./doof-lowering-constants"
 import { MinusModule, MinusFunction, MinusBlock, MinusValue, MinusInstruction } from "./minus-ir"
-
-function value(name: string, typeName: string): MinusValue => MinusValue { name, typeName }
-function instruction(op: string, args: string[], name: string = "", typeName: string = "none"): MinusInstruction => MinusInstruction { op, args, result: if name == "" then none else value(name, typeName) }
 
 export function injectStringWhitespace(module_: MinusModule): none {
   module_.functions.push(createMinusFunction{

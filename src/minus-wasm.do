@@ -6,10 +6,10 @@ import { parseDoofMinus } from "./minus-parse"
 import { validateDoofMinus } from "./minus-validate"
 import { pruneDeadBlockArguments, preserveReferenceLifetimes } from "./minus-optimize"
 import { WasmFunctionBody, WasmFunctionPlan, foldWasmFunctions } from "./minus-wasm-functions"
-import { reachableMinusFunctions, minusValueId, minusValues, minusOperandPositions, minusCallTarget, MinusValues, MinusEffects, analyzeMinusEffects } from "./minus-analysis"
+import { reachableMinusFunctions, minusReferenceType, minusValueId, minusValues, minusOperandPositions, minusCallTarget, MinusValues, MinusEffects, analyzeMinusEffects } from "./minus-analysis"
 import { WasmLocals, rawWasmLocals, allocateWasmLocals } from "./minus-wasm-locals"
 import { simplifyMinusInstructions } from "./minus-simplify"
-import { WasmInstruction, encodeWasmInstructions } from "./minus-wasm-instructions"
+import { WasmInstruction, encodeWasmInstructions, signed, unsigned } from "./minus-wasm-instructions"
 import { simplifyWasmInstructions } from "./minus-wasm-peepholes"
 import { orderWasmLocals, orderWasmFunctions } from "./minus-wasm-ordering"
 
@@ -62,7 +62,7 @@ function arrayElementType(module_: MinusModule, values: WasmLocals, instruction:
     if instruction.op == "array-get" || instruction.op == "array-peek" || instruction.op == "array-pop" { typeName = instruction.result!.typeName }
     if instruction.op == "array-set" { typeName = valueType(values, args[2]) }
     if instruction.op == "array-push" { typeName = valueType(values, args[1]) }
-    if reference(module_, typeName) { return "any" }
+    if minusReferenceType(module_, typeName) { return "any" }
     if arrayWidth(typeName) == 1 { return "byte" }
     if typeName == "long" || typeName == "float" || typeName == "double" { return typeName }
     return "int"
@@ -140,26 +140,6 @@ function arrayHelperIndex(helpers: WasmHelpers, operation: string, typeName: str
     panic("array helper missing")
 }
 
-function helperCount(helpers: WasmHelpers): int => helpers.arrays.length
-function unsigned(bytes: int[], value: int): none {
-    let remaining = value
-    while remaining >= 128 { bytes.push(remaining % 128 + 128); remaining = remaining \ 128 }
-    bytes.push(remaining)
-}
-
-function signed(bytes: int[], value: long): none {
-    let remaining = value
-    while true {
-        let next = remaining \ 128L
-        if remaining < 0L && remaining % 128L != 0L { next -= 1L }
-        low := remaining - next * 128L
-        done := (next == 0L && low < 64L) || (next == -1L && low >= 64L)
-        bytes.push(int(low) + if done then 0 else 128)
-        if done { return }
-        remaining = next
-    }
-}
-
 function append(bytes: int[], source: int[]): none { for value of source { bytes.push(value) } }
 function section(bytes: int[], id: int, payload: int[]): none { bytes.push(id); unsigned(bytes, payload.length); append(bytes, payload) }
 function name(bytes: int[], value: string): none {
@@ -175,12 +155,6 @@ function wasmType(typeName: string): int {
 }
 
 // Declaration lookups go through the module's hashed name indexes.
-function reference(module_: MinusModule, typeName: string): bool {
-    if typeName == "any" { return true }
-    lookup := minusModuleLookup(module_)
-    return lookupMinusName(lookup.classes, typeName) >= 0 || lookupMinusName(lookup.interfaces, typeName) >= 0
-}
-
 function tag(module_: MinusModule, typeName: string): int {
     if typeName == "none" { return 0 }
     if typeName == "bool" { return 1 }
@@ -390,7 +364,7 @@ function emitClassRelease(b: WasmInstruction[], module_: MinusModule, class_: Mi
         localGet(b, 0); localGet(b, 0); load32(b, 4); i32(b, 1); op(b, 107); store32(b, 4)
     }
     for fieldIndex_ of 0..<class_.fields.length {
-        if !reference(module_, class_.fields[fieldIndex_].typeName) { continue }
+        if !minusReferenceType(module_, class_.fields[fieldIndex_].typeName) { continue }
         localGet(b, 0); load32(b, classFieldOffset(class_, fieldIndex_)); call(b, runtimeFunctionIndex(module_, 2))
     }
 }
@@ -473,7 +447,7 @@ function emitRelease(module_: MinusModule): WasmInstruction[] {
     for index of 0..<module_.classes.length {
         class_ := module_.classes[index]
         let hasReferences = false
-        for field of class_.fields { if reference(module_, field.typeName) { hasReferences = true } }
+        for field of class_.fields { if minusReferenceType(module_, field.typeName) { hasReferences = true } }
         if hasReferences || class_.finalizer != "" { cleanupClasses.push(index) }
     }
     emitSharedReleaseDispatch(b, module_, cleanupClasses)
@@ -615,7 +589,7 @@ function emitArrayAllocation(code: WasmInstruction[], module_: MinusModule, scra
     end(code)
     localGet(code, scratchIndex + 1); i32(code, ARRAY_DATA_TAG); call(code, runtimeFunctionIndex(module_, 0)); localSet(code, scratchIndex)
     localGet(code, scratchIndex); localGet(code, lengthLocal); store32(code, 4)
-    if reference(module_, typeName) {
+    if minusReferenceType(module_, typeName) {
         // Reused small blocks may still contain pointers from old owners.
         localGet(code, scratchIndex); i32(code, 8); op(code, 106)
         i32(code, 0); localGet(code, lengthLocal); i32(code, 2); op(code, 116); operand(code, 252, 11)
@@ -902,7 +876,7 @@ function emitArrayInstruction(code: WasmInstruction[], module_: MinusModule, val
         localGet(code, scratchIndex); localGet(code, if reserving then scratchIndex + 10 else scratchIndex + 8); store32(code, 4)
         localGet(code, scratchIndex); localSet(code, scratchIndex + 11)
         if !reserving {
-            if reference(module_, typeName) { getValue(code, values, args[1]); call(code, runtimeFunctionIndex(module_, 1)); op(code, 26) }
+            if minusReferenceType(module_, typeName) { getValue(code, values, args[1]); call(code, runtimeFunctionIndex(module_, 1)); op(code, 26) }
             arrayAddress(code, module_, values, "", "", typeName, scratchIndex + 4, scratchIndex + 10, scratchIndex + 11)
             getValue(code, values, args[1]); store(code, typeName, 0)
         }
@@ -923,7 +897,7 @@ function emitArrayInstruction(code: WasmInstruction[], module_: MinusModule, val
         // Transfer the array's reference into the owned SSA result. No retain
         // or release is needed; clearing the slot prevents stale ownership.
         setResult(code, module_, values, instruction)
-        if reference(module_, typeName) { localGet(code, scratchIndex + 9); i32(code, 0); store32(code, 0) }
+        if minusReferenceType(module_, typeName) { localGet(code, scratchIndex + 9); i32(code, 0); store32(code, 0) }
         getValue(code, values, args[0]); localGet(code, scratchIndex + 10); store32(code, 4)
         return
     }
@@ -931,7 +905,7 @@ function emitArrayInstruction(code: WasmInstruction[], module_: MinusModule, val
         getValue(code, values, args[0]); load16Unsigned(code, 0); i32(code, ARRAY_DATA_TAG); op(code, 71)
         getValue(code, values, args[0]); load16Unsigned(code, 0); i32(code, ARRAY_DESCRIPTOR_TAG); op(code, 71); op(code, 113); if_(code); op(code, 0); end(code)
         getValue(code, values, args[0]); load16Unsigned(code, 0); i32(code, ARRAY_DESCRIPTOR_TAG); op(code, 70); if_(code)
-        if args.length == 2 && reference(module_, args[1]) {
+        if args.length == 2 && minusReferenceType(module_, args[1]) {
             i32(code, 0); localSet(code, scratchIndex + 3)
             block(code); loop(code)
             localGet(code, scratchIndex + 3); getValue(code, values, args[0]); load32(code, 4); op(code, 78); operand(code, 13, 1)
@@ -953,7 +927,7 @@ function emitArrayInstruction(code: WasmInstruction[], module_: MinusModule, val
         getValue(code, values, args[0]); i32(code, 0); load32(code, FREE_LIST_BASE); store32(code, 4)
         i32(code, 0); getValue(code, values, args[0]); store32(code, FREE_LIST_BASE)
         op(code, 5)
-        if args.length == 2 && reference(module_, args[1]) {
+        if args.length == 2 && minusReferenceType(module_, args[1]) {
             i32(code, 0); localSet(code, scratchIndex)
             block(code); loop(code)
             localGet(code, scratchIndex); getValue(code, values, args[0]); load32(code, 4); op(code, 78); operand(code, 13, 1)
@@ -986,7 +960,7 @@ function emitArrayInstruction(code: WasmInstruction[], module_: MinusModule, val
         setResult(code, module_, values, instruction)
         return
     }
-    if reference(module_, typeName) {
+    if minusReferenceType(module_, typeName) {
         // Retain first so replacing a slot with the same object is safe.
         getValue(code, values, args[2]); call(code, runtimeFunctionIndex(module_, 1)); op(code, 26)
         arrayAddress(code, module_, values, args[0], args[1], typeName, scratchIndex)
@@ -1255,12 +1229,12 @@ function setResult(code: WasmInstruction[], module_: MinusModule, values: WasmLo
     if values.stack[id] { return }
     index := values.slots[id]
     if index < 0 { op(code, 26); return }
-    if reference(module_, instruction.result!.typeName) && values.repeated[id] && !values.borrowed[id] && !values.moved[id] && !values.cleared[id] { localGet(code, index); call(code, runtimeFunctionIndex(module_, 2)) }
+    if minusReferenceType(module_, instruction.result!.typeName) && values.repeated[id] && !values.borrowed[id] && !values.moved[id] && !values.cleared[id] { localGet(code, index); call(code, runtimeFunctionIndex(module_, 2)) }
     localSet(code, index)
 }
 
 function retainTop(code: WasmInstruction[], module_: MinusModule, typeName: string): none {
-    if reference(module_, typeName) { call(code, runtimeFunctionIndex(module_, 1)) }
+    if minusReferenceType(module_, typeName) { call(code, runtimeFunctionIndex(module_, 1)) }
 }
 
 function normalize(code: WasmInstruction[], typeName: string): none {
@@ -1345,7 +1319,7 @@ function emitNumericConversion(code: WasmInstruction[], source: string, target: 
 
 function emitReleaseLocals(code: WasmInstruction[], module_: MinusModule, values: WasmLocals): none {
     for index of 0..<values.table.values.length {
-        if values.slots[index] >= 0 && !values.borrowed[index] && !values.moved[index] && reference(module_, values.table.values[index].typeName) {
+        if values.slots[index] >= 0 && !values.borrowed[index] && !values.moved[index] && minusReferenceType(module_, values.table.values[index].typeName) {
             localGet(code, values.slots[index]); call(code, runtimeFunctionIndex(module_, 2))
         }
     }
@@ -1370,7 +1344,7 @@ function emitEdge(code: WasmInstruction[], module_: MinusModule, blocks: MinusBl
         if sameEdgeSlot(values, arguments[index], block_.params[index].name) { continue }
         param := block_.params[index]
         id := valueId(values, param.name)
-        if reference(module_, param.typeName) && values.repeated[id] && !values.borrowed[id] && !values.cleared[id] { localGet(code, valueIndex(values, param.name)); call(code, runtimeFunctionIndex(module_, 2)) }
+        if minusReferenceType(module_, param.typeName) && values.repeated[id] && !values.borrowed[id] && !values.cleared[id] { localGet(code, valueIndex(values, param.name)); call(code, runtimeFunctionIndex(module_, 2)) }
     }
     let index = block_.params.length - 1
     while index >= 0 {
@@ -1421,7 +1395,7 @@ function emitDynamicField(code: WasmInstruction[], module_: MinusModule, values:
             setResult(code, module_, values, instruction)
         } else {
             fieldType := valueType(values, instruction.args[2])
-            if reference(module_, fieldType) {
+            if minusReferenceType(module_, fieldType) {
                 getValue(code, values, instruction.args[0]); load32(code, offset); call(code, runtimeFunctionIndex(module_, 2))
             }
             if fieldType != "none" {
@@ -1450,7 +1424,7 @@ function emitField(code: WasmInstruction[], module_: MinusModule, values: WasmLo
         setResult(code, module_, values, instruction)
     } else {
         fieldType := valueType(values, instruction.args[2])
-        if reference(module_, fieldType) { getValue(code, values, instruction.args[0]); load32(code, offset); call(code, runtimeFunctionIndex(module_, 2)) }
+        if minusReferenceType(module_, fieldType) { getValue(code, values, instruction.args[0]); load32(code, offset); call(code, runtimeFunctionIndex(module_, 2)) }
         if fieldType != "none" {
             getValue(code, values, instruction.args[0]); getValue(code, values, instruction.args[2])
             retainTop(code, module_, fieldType)
@@ -1536,7 +1510,7 @@ function emitNew(code: WasmInstruction[], module_: MinusModule, values: WasmLoca
 // "header" (the permanently zero bytes 0-7) reads as the none tag. Only
 // primitives and enums are boxed, in a 24-byte block tagged ANY_TAG with the
 // value's tag at offset 8 and the value at offset 16.
-function classValue(module_: MinusModule, typeName: string): bool => typeName != "none" && typeName != "any" && reference(module_, typeName)
+function classValue(module_: MinusModule, typeName: string): bool => typeName != "none" && typeName != "any" && minusReferenceType(module_, typeName)
 
 function emitBox(code: WasmInstruction[], module_: MinusModule, values: WasmLocals, instruction: MinusInstruction): none {
     if instruction.args.length == 2 {
@@ -1665,6 +1639,14 @@ function emitAnyEquality(code: WasmInstruction[], module_: MinusModule, values: 
 function emitInstruction(code: WasmInstruction[], module_: MinusModule, function_: MinusFunction, values: WasmLocals, frameIndex: int, scratchIndex: int, instruction: MinusInstruction, constants: string[], helpers: WasmHelpers, blocks: MinusBlock[], labels: string[]): none {
     operation := instruction.op
     args := instruction.args
+    if operation == "drop" {
+        id := valueId(values, args[0])
+        if !values.borrowed[id] {
+            getValue(code, values, args[0]); call(code, runtimeFunctionIndex(module_, 2))
+        }
+        i32(code, 0); localSet(code, valueIndex(values, args[0]))
+        return
+    }
     if operation == "panic" {
         if !module_.recoverPanics || args.length == 0 { op(code, 0); return }
         getValue(code, values, args[0]); call(code, runtimeFunctionIndex(module_, 1))
@@ -1742,7 +1724,7 @@ function emitInstruction(code: WasmInstruction[], module_: MinusModule, function
         emitEdge(code, module_, blocks, values, args[1], thenArgs, labels)
         op(code, 5)
         emitEdge(code, module_, blocks, values, args[split + 1], elseArgs, labels)
-        _ := try! labels.pop()
+        _ := labels.pop()!
         end(code)
         return
     }
@@ -1761,7 +1743,7 @@ function emitRegion(code: WasmInstruction[], module_: MinusModule, function_: Mi
         labels.push(region.label)
     }
     for child of region.children { emitRegion(code, module_, function_, child, values, constants, helpers, blocks, labels) }
-    if region.kind != "sequence" { _ := try! labels.pop(); end(code) }
+    if region.kind != "sequence" { _ := labels.pop()!; end(code) }
 }
 
 function emitUserFunction(module_: MinusModule, function_: MinusFunction, constants: string[], helpers: WasmHelpers, values: WasmLocals): WasmInstruction[] {
@@ -1795,7 +1777,7 @@ function emitUserFunction(module_: MinusModule, function_: MinusFunction, consta
     emitReleaseLocals(code, module_, values)
     if module_.recoverPanics {
         localGet(code, panicIndex + 1); if_(code)
-        if reference(module_, function_.result) { localGet(code, frameIndex + 4); call(code, runtimeFunctionIndex(module_, 2)) }
+        if minusReferenceType(module_, function_.result) { localGet(code, frameIndex + 4); call(code, runtimeFunctionIndex(module_, 2)) }
         if function_.capturePanics {
             // Transfer the exception's owned string into Failure<string>. Class
             // values in `any` are the objects themselves, so no boxes are needed.
@@ -1952,7 +1934,7 @@ function wrapperShape(module_: MinusModule, effects: MinusEffects, function_: Mi
         if instruction.op != "get" || instruction.result == none { return false }
         if uses[minusValueId(table, instruction.result!.name)] != 1 { return false }
         owner := table.values[minusValueId(table, instruction.args[0])].typeName
-        if minusValueId(effects.classes, owner) < 0 { return false }
+        if lookupMinusName(effects.classes, owner) < 0 { return false }
     }
     return true
 }
@@ -1972,7 +1954,7 @@ function inlineOperand(code: WasmInstruction[], module_: MinusModule, values: Wa
 }
 
 function inlineWrapper(code: WasmInstruction[], module_: MinusModule, values: WasmLocals, helpers: WasmHelpers, name_: string, instruction: MinusInstruction): bool {
-    target := minusValueId(helpers.effects.functions, name_)
+    target := lookupMinusName(helpers.effects.functions, name_)
     if target < 0 || !helpers.inlinable[target] { return false }
     callee := module_.functions[target]
     calleeCode := minusBlocks(callee)[0].instructions

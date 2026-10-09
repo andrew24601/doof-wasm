@@ -1,12 +1,9 @@
-import { createMinusFunction } from "./minus-build"
+import { createMinusFunction, instruction, value } from "./minus-build"
 // Replacement scans the original text twice and allocates the result once.
 // Empty searches are a no-op, matching the native runtime; matches never overlap
 // and inserted text is not searched again.
 import { STRING_CLASS, CHAR_ARRAY_CLASS } from "./doof-lowering-constants"
 import { MinusModule, MinusFunction, MinusBlock, MinusValue, MinusInstruction } from "./minus-ir"
-
-function value(name: string, typeName: string): MinusValue => MinusValue { name, typeName }
-function instruction(op: string, args: string[], name: string = "", typeName: string = "none"): MinusInstruction => MinusInstruction { op, args, result: if name == "" then none else value(name, typeName) }
 
 export function injectStringReplacement(module_: MinusModule): none {
   let overflowInstructions: MinusInstruction[] = []

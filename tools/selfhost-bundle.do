@@ -17,9 +17,9 @@ function logicalPath(path: string, root: string): string =>
 
 function main(arguments: string[]): int {
   if arguments.length != 2 { println("usage: selfhost-bundle entry.do output-directory"); return 2 }
-  root := try! absolute(".")
-  entry := try! absolute(arguments[0])
-  output := try! absolute(arguments[1])
+  root := absolute(".")!
+  entry := absolute(arguments[0])!
+  output := absolute(arguments[1])!
   if !entry.startsWith(root + "/") { println("entry must be inside the repository working directory"); return 2 }
   _ := mkdir(output) else { if !isDirectory(output) { println("could not create " + output); return 1 } }
   source := readText(entry) else { println("could not read " + entry); return 1 }

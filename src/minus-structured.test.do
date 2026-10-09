@@ -12,8 +12,8 @@ import { pruneDeadBlockArguments } from "./minus-optimize"
 
 function execute(bytes: byte[], name: string, script: string): none {
     path := "/tmp/doof-structured-" + string(pid()) + "-" + name + ".wasm"
-    try! writeBlob(path, bytes.cloneReadonly())
-    result := try! run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
+    writeBlob(path, bytes.cloneReadonly())!
+    result := run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
     _ := remove(path) else { panic("Could not remove structured Wasm fixture") }
     if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
     Assert.equal(result.exitCode, 0)
@@ -50,13 +50,13 @@ block done(%answer:int)
 return %answer
 end
 `
-    module_ := try! parseDoofMinus(source)
-    try! validateDoofMinus(module_)
+    module_ := parseDoofMinus(source)!
+    validateDoofMinus(module_)!
     Assert.equal(renderDoofMinus(module_), source)
     optimized := pruneDeadBlockArguments(module_)
-    try! validateDoofMinus(optimized)
+    validateDoofMinus(optimized)!
     Assert.equal(minusBlocks(optimized.functions[0])[1].params.length, 1)
-    execute(try! compileDoofMinus(source), "dominators", `
+    execute(compileDoofMinus(source)!, "dominators", `
 const fs=require('fs'),assert=require('assert');
 const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
 for(let n=0;n<100;n++)assert.strictEqual(e.count(n),n);
@@ -128,12 +128,12 @@ end`, "unterminated control region")
 }
 
 export function testSourceLoweringInheritsImmutableBindings(): none {
-    module_ := try! lowerDoofWasmSource(`export function count(limit: int): int {
+    module_ := lowerDoofWasmSource(`export function count(limit: int): int {
         increment := 2
         let n = 0
         while n < limit { n += increment }
         return n
-    }`)
+    }`)!
     function_ := module_.functions[0]
     let parameters = 0
     for block_ of minusBlocks(function_) { parameters += block_.params.length }
@@ -143,7 +143,7 @@ export function testSourceLoweringInheritsImmutableBindings(): none {
 }
 
 export function testNestedSourceLoopsEmitNoDispatchTables(): none {
-    bytes := try! compileDoofWasm(`export function nested(limit: int): int {
+    bytes := compileDoofWasm(`export function nested(limit: int): int {
         stride := 3
         let sum = 0
         for let i = 0; i < limit; i += 1 {
@@ -156,7 +156,7 @@ export function testNestedSourceLoopsEmitNoDispatchTables(): none {
             }
         }
         return sum
-    }`)
+    }`)!
     execute(bytes, "no-dispatch", `
 const fs=require('fs'),assert=require('assert'),b=fs.readFileSync(process.argv[1]);
 const e=new WebAssembly.Instance(new WebAssembly.Module(b)).exports;

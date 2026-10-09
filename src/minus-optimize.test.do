@@ -8,7 +8,7 @@ import { validateDoofMinus } from "./minus-validate"
 import { encodeDoofMinus, compileDoofMinus } from "./minus-wasm"
 
 export function testPrunesForwardedCyclesAndPreservesLiveExitValues(): none {
-    original := try! parseDoofMinus(`export func count(%limit:int) -> long
+    original := parseDoofMinus(`export func count(%limit:int) -> long
 scope done
 scope cycle
 block entry
@@ -32,12 +32,12 @@ block done(%answer:int, %discarded:long)
 %result:long = convert %answer
 return %result
 end
-`)
-    try! validateDoofMinus(original)
+`)!
+    validateDoofMinus(original)!
     snapshot := renderDoofMinus(original)
     original.functions[0].exportName = "renamed"
     optimized := pruneDeadBlockArguments(original)
-    try! validateDoofMinus(optimized)
+    validateDoofMinus(optimized)!
     function_ := optimized.functions[0]
     Assert.equal(function_.exportName, "renamed")
     for index of 1..<minusBlocks(function_).length { Assert.equal(minusBlocks(function_)[index].params.length, 1) }
@@ -49,11 +49,11 @@ end
     original.functions[0].exportName = ""
     Assert.equal(renderDoofMinus(original), snapshot)
     Assert.equal(renderDoofMinus(pruneDeadBlockArguments(optimized)), renderDoofMinus(optimized))
-    Assert.arrayEqual((try! encodeDoofMinus(original)).cloneReadonly(), (try! encodeDoofMinus(original)).cloneReadonly())
+    Assert.arrayEqual((encodeDoofMinus(original)!).cloneReadonly(), (encodeDoofMinus(original)!).cloneReadonly())
 }
 
 export function testKeepsUsesInCallsEffectsConditionsAndReturns(): none {
-    original := try! parseDoofMinus(`export func choose(%flag:bool, %value:long) -> long
+    original := parseDoofMinus(`export func choose(%flag:bool, %value:long) -> long
 scope done
 scope target
 block entry
@@ -66,11 +66,11 @@ end-scope
 block done(%result:long, %discarded:long)
 return %result
 end
-`)
+`)!
     original.imports.push(MinusImport { name: "observe", importName: "observe", params: [MinusValue { name: "%value", typeName: "long" }], result: "none" })
-    try! validateDoofMinus(original)
+    validateDoofMinus(original)!
     optimized := pruneDeadBlockArguments(original)
-    try! validateDoofMinus(optimized)
+    validateDoofMinus(optimized)!
     blocks := minusBlocks(optimized.functions[0])
     Assert.equal(blocks[1].params.length, 2)
     Assert.equal(blocks[2].params.length, 1)
@@ -79,7 +79,7 @@ end
 }
 
 export function testUnusedReferenceForwardingDoesNotRemoveAllocationsOrCalls(): none {
-    original := try! parseDoofMinus(`class Box
+    original := parseDoofMinus(`class Box
 field value:int
 end
 export func check() -> int
@@ -97,11 +97,11 @@ block second(%forwarded:Box)
 %answer:int = const 42
 return %answer
 end
-`)
+`)!
     original.imports.push(MinusImport { name: "effect", importName: "effect", result: "int" })
-    try! validateDoofMinus(original)
+    validateDoofMinus(original)!
     optimized := pruneDeadBlockArguments(original)
-    try! validateDoofMinus(optimized)
+    validateDoofMinus(optimized)!
     blocks := minusBlocks(optimized.functions[0])
     Assert.equal(blocks[0].instructions[0].op, "call")
     Assert.equal(blocks[0].instructions[1].op, "new")
@@ -111,7 +111,7 @@ end
 }
 
 export function testLiteralTextIsNotAParameterUseAndMetadataSurvives(): none {
-    original := try! parseDoofMinus(`class __doof_array_char
+    original := parseDoofMinus(`class __doof_array_char
 field let data:int
 end
 class __doof_string
@@ -126,10 +126,10 @@ block target(%unused:int)
 %literal:__doof_string = string-const %unused
 return %value
 end
-`)
-    try! validateDoofMinus(original)
+`)!
+    validateDoofMinus(original)!
     optimized := pruneDeadBlockArguments(original)
-    try! validateDoofMinus(optimized)
+    validateDoofMinus(optimized)!
     block_ := minusBlocks(optimized.functions[0])[1]
     Assert.equal(block_.params.length, 0)
     Assert.equal(block_.line, minusBlocks(original.functions[0])[1].line)
@@ -154,7 +154,7 @@ end
 }
 
 export function testRetainsReferenceArgumentsForObservableDestructors(): none {
-    original := try! parseDoofMinus(`class Owner
+    original := parseDoofMinus(`class Owner
 destructor Owner.destroy
 end
 func Owner.destroy(%self:Owner) -> none
@@ -171,11 +171,11 @@ end-scope
 block done(%unused:Owner, %discarded:int)
 return %value
 end
-`)
+`)!
     original.imports.push(MinusImport { name: "record", importName: "record", result: "none" })
-    try! validateDoofMinus(original)
+    validateDoofMinus(original)!
     optimized := pruneDeadBlockArguments(original)
-    try! validateDoofMinus(optimized)
+    validateDoofMinus(optimized)!
     Assert.equal(minusBlocks(optimized.functions[1])[1].params.length, 1)
     Assert.equal(minusBlocks(optimized.functions[1])[1].params[0].typeName, "Owner")
 }

@@ -43,6 +43,10 @@ the full Doof compiler.
   subject to available Wasm memory.
   Byte arrays also support `.cloneReadonly()` and `.cloneMutable()` as independent
   copies, including arrays that span multiple chunks.
+  Nullable arrays and strings support optional indexing (`receiver?[index]`).
+  The receiver evaluates once; an absent receiver returns `none` without
+  evaluating the index. Present receivers retain ordinary bounds checks, and
+  reference and union element types keep their checked ownership and tags.
 - `Map<string, bool>` with empty/populated literals, `.has(key)`,
   `.get(key): Result<bool, string>`, `.set(key, value)`, and `.size`. Missing
   keys return `Failure("Map key not found")`. Keys compare by string content;
@@ -98,17 +102,35 @@ the full Doof compiler.
   preserve shared identity, mutable interiors on shallow immutable bindings, and
   reference ownership across calls. The frontend's module-initializer checks
   still apply; arbitrary executable initializers remain unsupported.
-- Local `let`, `readonly`, and inferred immutable bindings; returns; `if`,
-  `if`/`else`, and `else if` branches that rejoin; union `case` statements with
-  type captures (including union aliases), `none`, and wildcard arms; `while`
+- Local `let`, `readonly`, and inferred immutable bindings; scoped `with`
+  bindings with optional annotations, sequential initializers, nesting, and
+  retained `_` discards. Scoped roots remain alive throughout the body and
+  release at normal scope exits, loop exits, and `yield`; function exits use
+  the shared cleanup epilogue. Escaping references retain their ownership,
+  and shadowed outer bindings are restored with their latest assignments.
+  Returns; `if`,
+  `if`/`else`, and `else if` branches that rejoin; `case` statements over supported
+  scalar and union subjects with type captures (including union aliases), value,
+  integer range, and wildcard arms. Ranges may be inclusive, exclusive, or
+  open-ended; alternative patterns use `|` and short-circuit in source order.
+  The subject evaluates once. Multiple patterns in one arm cannot introduce
+  named type captures. Case expressions support the same patterns and produce
+  checked arm values, including numeric widening, reference/interface results,
+  union boxing, and `Result` captures. Block arms use scoped `yield` exits through
+  nested branches and loops; nested cases and local `<-` value blocks keep their
+  own yield targets. Mutable locals rejoin with the result, and terminating arms
+  contribute no value edge. Local `<-` declarations and reassignments are
+  supported, including reassignments of captured mutable bindings.
+  Also supported are `while`
   loops; C-style `for` loops;
   and `for-of` loops over supported arrays and integer ranges. Checked statements
   after a terminating return, loop exit, or exhaustive branch are omitted.
   Constant-true loops without a reachable break have no fallthrough.
   Array iterables
-  and range endpoints are evaluated once per loop entry. Unlabeled `break` and
-  `continue` target the innermost loop and carry local values through the exit
-  or update edge; `continue` executes C-style updates and for-of increments.
+  and range endpoints are evaluated once per loop entry. Loops may have labels;
+  `break` and `continue` target the innermost loop or the named enclosing loop
+  and carry local values through the exit or update edge. Labeled and unlabeled
+  `continue` execute the target loop's C-style updates or for-of increments.
 - Value `if` expressions, `??` for nullable and `Result` values, and `?.`
   member or method access that propagates `none` from a nullable receiver.
   Shared field reads through class unions dispatch by concrete tag, preserving
@@ -134,8 +156,9 @@ the full Doof compiler.
   for subsequent narrowing.
 - Arithmetic `+`, `-`, `*`, `/`, integer division `\`, and integer remainder
   `%`; compound arithmetic assignments on locals, fields, and array elements;
-  short-circuit `&&` and `||`; comparisons `==`, `!=`, `<`, `>`, `<=`, `>=`; unary `-`
-  and `!`; direct, instance, named, and closure calls; field reads and writes;
+  short-circuit `&&` and `||`; comparisons `==`, `!=`, `<`, `>`, `<=`, `>=`
+  (numeric comparisons promote mixed primitive widths); unary `-` and `!`;
+  direct, instance, named, and closure calls; field reads and writes;
   positional and named class construction; class-to-interface assignment;
   numeric conversion; and `any`
   boxing/casts. Union members are boxed into `any`; comparisons with `none`
@@ -143,13 +166,22 @@ the full Doof compiler.
   concrete operand and uses nominal tag/payload equality, comparing strings by
   content and class/array references by identity. Plain statement-level `try` unwraps a Result and
   returns the original Failure arm on failure. `Success(...)` and `Failure(...)`
-  calls and brace constructors are supported. Discarded bindings evaluate their
+  calls and brace constructors are supported, including payloadless `Success()`
+  and `Failure()`. Intrinsic arm equality compares payloads by value, including
+  Results nested in payloads. Discarded bindings evaluate their
   value. Forced access on strong nullable receivers casts and traps on `none`.
-  `try!` and postfix `!` unwrap a Result and trap on failure;
-  `try?` unwraps the success value and produces `none` on failure. A nullable
-  value or Result can be unwrapped with the `else` binding form, including a
-  named Result error capture or a discarded success binding. Handlers must
-  terminate. The `panic(message)`
+  Postfix `!` checks every absent layer and traps on outer `none`, Failure, or
+  a nullable success payload of `none`; `Result<none, E>!` checks only Failure.
+  Postfix `?` collapses those layers to a nullable present value. `?.`, `?[]`,
+  and `??` use the same absence rules, evaluate their subject once, and skip
+  arguments, indexes, or fallbacks when appropriate. A Result-valued optional
+  access keeps the member's own Failure and wraps receiver absence in `Success(none)`.
+  The removed `try!` / `try?` forms receive frontend diagnostics naming their
+  postfix replacements. Only statement `try` propagates Failure; declarations
+  and assignments to supported targets retain checked success types.
+  Declaration-`else` checks all absent layers and can capture `E | none` when
+  absence can come from `none`. Named success bindings require a terminating
+  handler; `_ := expr else ...` permits a continuing handler. The `panic(message)`
   intrinsic is supported as a terminating trap; the Wasm backend discards its
   message.
 
@@ -194,15 +226,18 @@ matching the native runtime.
 ## Not supported yet
 
 Generics, string-backed enums, arrays whose
-element type is unsupported by doof--, labeled loops and exits, loop-else
-clauses, for-of destructuring, map/set/stream iteration, static fields, weak references, case expressions,
-value/range patterns, and multiple patterns per case arm,
+element type is unsupported by doof--, loop-then
+clauses, for-of destructuring, map/set/stream iteration, static fields, weak references,
+multiple case patterns with named type captures,
 async code outside the opt-in self-hosting mode, actors, nested lexical blocks, arbitrary module initializers,
 fallible declaration-else handlers that continue, try destructuring/else handlers, and other
 source expressions. Named method values remain unsupported; named free-function
 values and lambdas use the supported closure ABI. The doof-- backend
 already supports more control flow and runtime operations; the source lowering
 will grow to cover those as the subset is developed.
+
+See [the implementation gap inventory](implementation-gaps.md) for the comparison
+with doof-lang and the remaining work.
 
 The compiler uses the existing Doof front end for parsing and type checking.
 The complete portable compiler graph now bootstraps into Wasm and compiles

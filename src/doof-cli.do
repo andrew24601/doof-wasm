@@ -31,7 +31,7 @@ function main(arguments: string[]): int {
 }
 
 function compileWithJs(inputPath: string, outputPath: string, debugHeap: bool, options: WasmLoweringOptions): int {
-  path := try! absolute(inputPath)
+  path := absolute(inputPath)!
   source := readText(path) else {
     println("could not read " + inputPath)
     return 1
@@ -62,7 +62,7 @@ function compileWithJs(inputPath: string, outputPath: string, debugHeap: bool, o
 }
 
 function dumpMinus(inputPath: string, outputPath: string, options: WasmLoweringOptions): int {
-  path := try! absolute(inputPath)
+  path := absolute(inputPath)!
   source := readText(path) else {
     println("could not read " + inputPath)
     return 1

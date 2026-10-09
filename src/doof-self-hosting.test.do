@@ -9,24 +9,24 @@ import { encodeDoofMinus } from "./minus-wasm"
 import { renderDoofJs } from "./minus-js"
 
 function runSourceWithBindings(source: string, name: string, script: string): none {
-  module_ := try! lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  module_ := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")!
   runModuleWithBindings(module_, name, script)
 }
 
 function runModuleWithBindings(module_: MinusModule, name: string, script: string): none {
-  bytes := try! encodeDoofMinus(module_, true)
+  bytes := encodeDoofMinus(module_, true)!
   wasmPath := "/tmp/doof-source-arrays-" + string(pid()) + "-" + name + ".wasm"
   jsPath := "/tmp/doof-source-arrays-" + string(pid()) + "-" + name + ".mjs"
-  try! writeBlob(wasmPath, bytes.cloneReadonly())
-  try! writeText(jsPath, renderDoofJs(module_, true))
-  result := try! run("node", ["-e", `
+  writeBlob(wasmPath, bytes.cloneReadonly())!
+  writeText(jsPath, renderDoofJs(module_, true))!
+  result := run("node", ["-e", `
 const fs = require('fs'), assert = require('assert'), {pathToFileURL} = require('url');
 (async () => {
   const ffi = await import(pathToFileURL(process.argv[2]).href);
   const bytes = fs.readFileSync(process.argv[1]);
   ${script}
 })().catch(error => { console.error(error); process.exit(1); });
-`, wasmPath, jsPath], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
+`, wasmPath, jsPath], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
   _ := remove(wasmPath) else { panic("Could not remove temporary Wasm file") }
   _ := remove(jsPath) else { panic("Could not remove temporary JavaScript file") }
   if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
@@ -197,9 +197,9 @@ export function parse(source: string): string {
 `
   let sources = [SourceFile { path: "/src/entry.do", source: entry }]
   for name of ["minus-parse", "minus-render", "minus-ir"] {
-    sources.push(SourceFile { path: "/src/" + name + ".do", source: try! readText("src/" + name + ".do") })
+    sources.push(SourceFile { path: "/src/" + name + ".do", source: readText("src/" + name + ".do")! })
   }
-  module_ := try! lowerDoofWasmSources(sources, "/src/entry.do")
+  module_ := lowerDoofWasmSources(sources, "/src/entry.do")!
   runModuleWithBindings(module_, "existing-parser", `
 const {instance}=await WebAssembly.instantiate(bytes),api=ffi.createDoofModule(instance);
 const source='export func answer() -> int\\nblock entry\\n%answer:int = const 42\\nreturn %answer\\nend\\n';
@@ -385,7 +385,7 @@ for(let i=0;i<30;i++){
 }
 
 export function testSelfHostingImportedSharedUnionFieldsInWasm(): none {
-  module_ := try! lowerDoofWasmSources([
+  module_ := lowerDoofWasmSources([
     SourceFile { path: "/main.do", source: `
 import { Item as First, read as firstRead } from "./first"
 import { Item as Second, read as secondRead } from "./second"
@@ -405,7 +405,7 @@ import { Item as First } from "./first"
 export class Item { kind: string = "second"; padding: long = 0l }
 export function read(value: Item | First): string => value.kind
 ` },
-  ], "/main.do")
+  ], "/main.do")!
   runModuleWithBindings(module_, "imported-union-fields", `
 const {instance}=await WebAssembly.instantiate(bytes),api=ffi.createDoofModule(instance),heap=ffi.createDoofHeapInspector(instance);
 const live=()=>heap.dumpHeap().filter(b=>b.kind!=='free').map(b=>[b.address,b.kind,b.refCount]);const baseline=live();
@@ -417,7 +417,7 @@ assert.deepStrictEqual(live(),baseline);
 }
 
 export function testSelfHostingSharedUnionFieldWritesInWasm(): none {
-  module_ := try! lowerDoofWasmSources([
+  module_ := lowerDoofWasmSources([
     SourceFile { path: "/main.do", source: `
 import { First as A, Second as B, Child, Other } from "./fields"
 type Choice = A | B | none
@@ -479,7 +479,7 @@ export class Second {
   padding: int = 7
 }
 ` },
-  ], "/main.do")
+  ], "/main.do")!
   runModuleWithBindings(module_, "union-field-writes", `
 const {instance}=await WebAssembly.instantiate(bytes),api=ffi.createDoofModule(instance),heap=ffi.createDoofHeapInspector(instance);
 const live=()=>heap.dumpHeap().filter(block=>block.kind!=='free').map(block=>[block.address,block.kind,block.refCount]);
@@ -581,7 +581,7 @@ assert.deepStrictEqual(live(),baseline);
 }
 
 export function testSelfHostingNamedFunctionImportsKeepDeclarationIdentity(): none {
-  module_ := try! lowerDoofWasmSources([
+  module_ := lowerDoofWasmSources([
     SourceFile { path: "/one.do", source: "function original(value: int): int => value + 1\nexport { original as same }" },
     SourceFile { path: "/two.do", source: "export function same(value: int): int => value + 2" },
     SourceFile { path: "/apply.do", source: "export function apply(callback: (value: int): int): int => callback(10)" },
@@ -598,7 +598,7 @@ export function check(): string {
   return string(apply(first)) + ":" + string(apply(second)) + ":" + invoke(host)
 }
 ` },
-  ], "/main.do")
+  ], "/main.do")!
   runModuleWithBindings(module_, "named-function-imports", `
 let publications=0;
 const bridge=ffi.createDoofImports({host:value=>value+'!',publish:value=>{assert.strictEqual(value,'published');publications++}});
@@ -619,7 +619,7 @@ function load(path: string): Result<Source | none, string> {
   return Success(Source { text: path })
 }
 function compile(path: string, loader: (path: string): Result<Source | none, string>): string {
-  source := loader(path) else message { return message }
+  source := loader(path) else message { return message ?? "absent" }
   case source {
     loaded: Source -> { return loaded.text }
     _ -> { return "absent" }
@@ -694,7 +694,7 @@ export function check(): int {
 }
 ` },
   ]
-  module_ := try! lowerDoofWasmSources(sources, "/main.do")
+  module_ := lowerDoofWasmSources(sources, "/main.do")!
   runModuleWithBindings(module_, "module-constants", `
 const {instance}=await WebAssembly.instantiate(bytes);
 assert.strictEqual(ffi.createDoofModule(instance).check(),21);
@@ -724,7 +724,7 @@ export readonly NESTED = [["int", "long"], ["float", "double"]]
 export readonly TYPES = ["int", "long"]
 ` },
   ]
-  module_ := try! lowerDoofWasmSources(sources, "/main.do")
+  module_ := lowerDoofWasmSources(sources, "/main.do")!
   Assert.equal(module_.globals.length, 4)
   runModuleWithBindings(module_, "array-constants", `
 const {instance}=await WebAssembly.instantiate(bytes),api=ffi.createDoofModule(instance),heap=ffi.createDoofHeapInspector(instance);

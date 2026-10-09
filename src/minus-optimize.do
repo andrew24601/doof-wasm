@@ -1,8 +1,9 @@
 import { minusBlocks } from "./minus-control-flow"
+import { minusReferenceType } from "./minus-analysis"
 // Block arguments are SSA copies, not additional source bindings. Trace their
 // uses backwards through incoming edges; an unobserved forwarding cycle stays
 // dead. Instructions and function parameters retain their existing ownership.
-import { MinusBlock, MinusFunction, MinusInstruction, MinusModule, MinusRegion, MinusValue, MinusNameIndex, createMinusNameIndex, lookupMinusName, insertMinusName, minusModuleLookup } from "./minus-ir"
+import { MinusBlock, MinusFunction, MinusInstruction, MinusModule, MinusRegion, MinusValue, MinusNameIndex, createMinusNameIndex, lookupMinusName, insertMinusName } from "./minus-ir"
 
 class ParameterLiveness {
     // Block parameter names in offset order, and block names in block order.
@@ -62,12 +63,6 @@ function addEdge(state: ParameterLiveness, blocks: MinusBlock[], target: string,
     }
 }
 
-function referenceType(module_: MinusModule, typeName: string): bool {
-    if typeName == "any" { return true }
-    lookup := minusModuleLookup(module_)
-    return lookupMinusName(lookup.classes, typeName) >= 0 || lookupMinusName(lookup.interfaces, typeName) >= 0
-}
-
 function storageFinalizer(function_: MinusFunction): bool {
     // Prove the simple storage-cleanup body used by generated array wrappers.
     // Anything else can observe when the last reference is released.
@@ -116,7 +111,7 @@ function parameterLiveness(module_: MinusModule, function_: MinusFunction, prese
         offset := state.offsets[blockIndex_]
         if preserveReferences {
             for index of 0..<block_.params.length {
-                if referenceType(module_, block_.params[index].typeName) { markLive(state, offset + index) }
+                if minusReferenceType(module_, block_.params[index].typeName) { markLive(state, offset + index) }
             }
         }
         for instruction of block_.instructions {

@@ -9,7 +9,7 @@ function integerType(typeName: string): bool => (typeName == "int" || typeName =
 function constantValue(literal: string, typeName: string): long {
     if typeName == "bool" { return if literal == "true" then 1L else 0L }
     if typeName == "none" { return 0L }
-    return try! parseLong(literal)
+    return parseLong(literal)!
 }
 
 function foldConstant(instruction: MinusInstruction, table: MinusValues, constants: string[]): MinusInstruction {

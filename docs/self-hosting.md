@@ -321,7 +321,7 @@ the following results:
 | Existing compiler requirement | Probe | Current result |
 | --- | --- | --- |
 | Compound assignment | `value += 1` | Supported on locals, fields, and array elements |
-| Loop exits | `break`, `continue` | Supported for unlabeled while, for, and for-of loops |
+| Loop exits | `break`, `continue`, labeled exits | Supported for while, for, and for-of loops, including exits to enclosing loops |
 | String concatenation | `source + "x"` | Supported with a fresh chunk-backed string |
 | Splitting source into lines | `source.split("\n")` | Supported, including empty fields and empty separators |
 | Formatting diagnostics and names | `string(value)` | Supported for int, long, byte, bool, char, and string |
@@ -335,8 +335,8 @@ construction field shorthand, and forced access on strong nullable receivers.
 Source and synthesized runtime functions carry expression temporaries explicitly
 across branches.
 
-Collection/boxed-union interpolation, arbitrary module initializers, labeled
-loop exits, and loop-else remain unsupported. Primitive and integer-enum
+Collection/boxed-union interpolation, arbitrary module initializers, and loop
+`then` clauses remain unsupported. Primitive and integer-enum
 interpolation and enum string formatting now execute in Wasm. Numeric parsing and float-byte
 encoding are provided by the injected stdlib subset. Byte snapshots, enum
 backing values, Result declaration-else captures, and forced Result unwraps are
@@ -356,9 +356,10 @@ doof run tools/selfhost-fixtures.do -- build/selfhost-references.json
 node tools/selfhost-smoke.mjs build/selfhost-compiler.wasm build/selfhost-compiler.js std/wasm build/selfhost-references.json
 ```
 
-The 12-reference corpus includes arithmetic, imports, enum interpolation, std
-numeric parsing, closures, a 262,145-character literal, syntax/type/name/import
-diagnostics, an absent std module, and successful compilation after failures.
+The 14-reference corpus includes arithmetic, imports, enum interpolation, std
+numeric parsing, closures, layered Result/none handling, removed-prefix syntax
+diagnostics, a 262,145-character literal, syntax/type/name/import diagnostics,
+an absent std module, and successful compilation after failures.
 Successful artifacts match native bytes and bindings exactly and execute; failed
 calls match native diagnostics and publish nothing. The gate also checks loader
 failure, repeated recovery, compiler heap baselines, memory growth, and disabled
@@ -466,3 +467,27 @@ Wasm traps and exceptions thrown by host imports are outside this capture path.
 These compatibility primitives now support the compiler artifact fixed point
 described above. Broader source coverage still needs work. Checked-AST cycles
 are now released after lowering, so full self-compiles leave a clean heap.
+
+## Result/none syntax migration, 2026-10-02
+
+Compiler sources, test fixtures, and native bootstrap tools use postfix `!` and
+`?` in place of the removed prefix forms. Result/none lowering follows the
+frontend's absence layers, preserves a Result-valued optional access's own
+Failure, and supports continuing discarded declaration-else handlers and try
+assignment. Intrinsic Result arms compare their payloads by value. Validation
+keeps `Success(none)` as a legitimate instruction-without-result outcome by
+matching the Result explicitly instead of using declaration-else.
+
+The 84-module frozen graph passes all 192 native tests and 14 native/Wasm
+reference cases. Native stage 1 and Wasm stages 2/3 produce identical
+**1,523,658-byte Wasm** and identical bindings. Wasm stages rebuild in 3.637 and
+3.602 seconds, using 139,984,896 bytes of linear memory. Both retain all 8,908
+baseline heap roots, with no unexpected live allocations, changed roots, or
+missing roots; the eight-byte none header remains zero.
+
+The Wasm SHA-256 is
+`1c6af8fe24e0b77e9be2de03487112c70b6edf1fbfdd2e052d06e3cb8d99b775`;
+the bindings SHA-256 is
+`20b79cbf1c3a66ec63fbf4eea4caa09ced9ed7a1f0831d41a032eb4567b2798c`.
+The maintained source boundary still excludes `??=`, Result statement-else,
+try destructuring, and general checked catch/as flows.

@@ -76,7 +76,7 @@ console.log('caller-owned module loading executes');
 
 const numeric = await compile('import { parseInt } from "std/parse"\nexport function answer(text: string): int => parseInt(text)!');
 assert.equal(numeric.answer('42'), 42);
-assert.throws(() => numeric.answer('invalid'), /Result forced unwrap failed/);
+assert.throws(() => numeric.answer('invalid'), /forced unwrap failed/);
 console.log('injected stdlib and generated bindings execute');
 
 for (const [source, expected, acquisitionFailure] of [
@@ -125,7 +125,7 @@ if (referencePath) {
         assert.equal(result.format(false), 'phase=cold;ready=false;value=-1');
       } else if (reference.name === 'numeric') {
         assert.equal(result.answer('42'), 42);
-        assert.throws(() => result.answer('invalid'), /Result forced unwrap failed/);
+        assert.throws(() => result.answer('invalid'), /forced unwrap failed/);
       } else if (reference.name === 'large') {
         assert.equal(result.answer(), 'x'.repeat(262145));
       } else {

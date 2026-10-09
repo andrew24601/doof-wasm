@@ -69,7 +69,7 @@ export function analyzeMinusControlFlow(blocks: MinusBlock[]): MinusControlFlow 
             cursors[top] += 1
             if !visited[successor] { visited[successor] = true; stack.push(successor); cursors.push(0) }
         } else {
-            postorder.push(block_); _ := try! stack.pop(); _ := try! cursors.pop()
+            postorder.push(block_); _ := stack.pop()!; _ := cursors.pop()!
         }
     }
     let index = postorder.length - 1
@@ -119,7 +119,7 @@ function loops(blocks: MinusBlock[], flow: MinusControlFlow): NaturalLoop[] {
             loop_ := result[loopIndex]
             let pending = [source]
             while pending.length > 0 {
-                block_ := try! pending.pop()
+                block_ := pending.pop()!
                 if loop_.members.contains(block_) { continue }
                 loop_.members.push(block_)
                 for predecessor of flow.predecessors[block_] {
@@ -206,7 +206,7 @@ function collectRegionOrder(region: MinusRegion, blocks: MinusBlock[], labels: s
         if !collectRegionOrder(child, blocks, labels, seen, order) { return false }
     }
     if region.kind == "loop" && (order.length == start || blocks[order[start]].name != region.label) { return false }
-    if region.kind != "sequence" { _ := try! labels.pop() }
+    if region.kind != "sequence" { _ := labels.pop()! }
     return true
 }
 

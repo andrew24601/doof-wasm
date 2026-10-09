@@ -25,7 +25,7 @@ function assertBorrowed(module_: MinusModule, functionName: string, name: string
 export function testCodegenBorrowsImmutableFieldsAndBoxPayloadsFromStableOwners(): none {
     // The low-level host ABI admits string pointers. Use that nominal carrier
     // for raw reference-count observations; this fixture performs no string IO.
-    module_ := try! parseDoofMinus(`class __doof_string
+    module_ := parseDoofMinus(`class __doof_string
 field value:int
 destructor __doof_string.destroy
 end
@@ -103,7 +103,7 @@ block entry
 %root:Root = call make(%value)
 %failed:none = call fail(%root)
 return
-end`)
+end`)!
     module_.recoverPanics = true
     module_.imports.push(MinusImport { name: "record", importModule: "host", importName: "record", params: [MinusValue { name: "%value", typeName: "int" }], result: "none" })
     module_.imports.push(MinusImport { name: "observe", importModule: "host", importName: "observe", params: [MinusValue { name: "%leaf", typeName: "__doof_string" }], result: "none" })
@@ -112,7 +112,7 @@ end`)
     assertBorrowed(module_, "owned", "%ownedBox", false)
     assertBorrowed(module_, "owned", "%ownedLeaf", false)
     for name of ["%box", "%leaf", "%alias"] { assertBorrowed(module_, "fail", name, true) }
-    execute((try! encodeDoofMinusWithLayout(module_, true)).bytes, "immutable-borrows", `
+    execute((encodeDoofMinusWithLayout(module_, true)!).bytes, "immutable-borrows", `
 const fs=require('fs'),assert=require('assert'),events=[];let e,observations=0;
 const count=p=>new DataView(e.__doof_ffi_memory.buffer).getUint32(p+4,true);
 e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1])),{host:{record:n=>events.push(n),observe:p=>{assert.strictEqual(count(p),1);observations++;},observeReturned:p=>assert.strictEqual(count(p),2)}}).exports;
@@ -130,7 +130,7 @@ for(let p=1024;p<e.__doof_debug_heap_end.value;p+=v.getUint16(p+2,true))assert.s
 }
 
 export function testCodegenBorrowingRejectsMutableFieldsAndRepeatingOwners(): none {
-    module_ := try! parseDoofMinus(`interface View
+    module_ := parseDoofMinus(`interface View
 field leaf:Leaf
 end
 class Leaf
@@ -183,13 +183,13 @@ end-loop
 end-scope
 block done(%result:int)
 return %result
-end`)
+end`)!
     assertBorrowed(module_, "view", "%leaf", false)
     assertBorrowed(module_, "snapshot", "%old", false)
     assertBorrowed(module_, "work", "%stable", true)
     assertBorrowed(module_, "work", "%child", false)
     for name of ["%carried", "%carriedChild", "%carriedCopy"] { assertBorrowed(module_, "work", name, false) }
-    execute((try! encodeDoofMinusWithLayout(module_, true)).bytes, "mutable-borrows", `
+    execute((encodeDoofMinusWithLayout(module_, true)!).bytes, "mutable-borrows", `
 const fs=require('fs'),assert=require('assert');
 const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
 for(let n=0;n<100;n++)assert.strictEqual(e.work(n),n);
@@ -200,7 +200,7 @@ for(let p=1024;p<e.__doof_debug_heap_end.value;p+=v.getUint16(p+2,true))assert.s
 
 export function testCodegenBorrowedLoopArgumentsSwapInParallelAndCopiesKeepTheirValue(): none {
     // As above, observe the reference carrier directly through the raw ABI.
-    module_ := try! parseDoofMinus(`class __doof_string
+    module_ := parseDoofMinus(`class __doof_string
 field value:int
 destructor __doof_string.destroy
 end
@@ -247,7 +247,7 @@ block entry
 %counted:none = call observeReturned(%result)
 %value:int = get %result.value
 return %value
-end`)
+end`)!
     for name of ["observe", "observeReturned"] {
         module_.imports.push(MinusImport { name, importModule: "host", importName: name, params: [MinusValue { name: "%text", typeName: "__doof_string" }], result: "none" })
     }
@@ -261,7 +261,7 @@ end`)
         if layout.table.values[index].name == "%a" { aSlot = layout.slots[index] }
     }
     Assert.notEqual(savedSlot, aSlot)
-    execute((try! encodeDoofMinusWithLayout(module_, true)).bytes, "borrowed-phis", `
+    execute((encodeDoofMinusWithLayout(module_, true)!).bytes, "borrowed-phis", `
 const fs=require('fs'),assert=require('assert'),events=[];let e;
 const count=p=>new DataView(e.__doof_ffi_memory.buffer).getUint32(p+4,true);
 e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1])),{host:{record:n=>events.push(n),observe:p=>assert.strictEqual(count(p),1),observeReturned:p=>assert.strictEqual(count(p),2)}}).exports;
@@ -275,15 +275,15 @@ for(let p=1024;p<e.__doof_debug_heap_end.value;p+=v.getUint16(p+2,true))assert.s
 
 function execute(bytes: byte[], name: string, script: string): none {
     path := "/tmp/doof-codegen-" + string(pid()) + "-" + name + ".wasm"
-    try! writeBlob(path, bytes.cloneReadonly())
-    result := try! run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
-    try! remove(path)
+    writeBlob(path, bytes.cloneReadonly())!
+    result := run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
+    remove(path)!
     if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
     Assert.equal(result.exitCode, 0)
 }
 
 export function testCodegenPrunesPrivateCyclesAndDeadBranches(): none {
-    module_ := try! parseDoofMinus(`class __doof_array_char
+    module_ := parseDoofMinus(`class __doof_array_char
 field data:int
 end
 class __doof_string
@@ -322,9 +322,9 @@ jump done(%bad)
 end-scope
 block done(%result:int)
 return %result
-end`)
+end`)!
     before := renderDoofMinus(module_)
-    encoded := try! encodeDoofMinusWithLayout(module_)
+    encoded := encodeDoofMinusWithLayout(module_)!
     for index of 0..<3 { Assert.equal(encoded.functionBodies[index], -1) }
     Assert.equal(encoded.definedFunctions, 4)
     Assert.equal(renderDoofMinus(module_), before)
@@ -337,7 +337,7 @@ assert.strictEqual(e.answer(),42);
 }
 
 export function testCodegenConstantsWrapAndUnusedTrapsRemain(): none {
-    module_ := try! parseDoofMinus(`export func wrap() -> int
+    module_ := parseDoofMinus(`export func wrap() -> int
 block entry
 %max:int = const 2147483647
 %one:int = const 1
@@ -372,14 +372,14 @@ block entry
 %unused:int = convert %value
 %answer:int = const 42
 return %answer
-end`)
+end`)!
     optimized := simplifyMinusInstructions(module_)
-    try! validateDoofMinus(optimized)
+    validateDoofMinus(optimized)!
     text := renderDoofMinus(optimized)
     Assert.stringContains(text, "const -2147483648")
     Assert.equal(text.contains("copy "), false)
     Assert.equal(text.contains("mul "), false)
-    execute((try! encodeDoofMinusWithLayout(module_)).bytes, "traps", `
+    execute((encodeDoofMinusWithLayout(module_)!).bytes, "traps", `
 const fs=require('fs'),assert=require('assert');
 const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
 assert.strictEqual(e.wrap(),-2147483648);assert.strictEqual(e.narrow(),0);
@@ -391,7 +391,7 @@ assert.strictEqual(e.truncate(1.5),42);
 }
 
 export function testCodegenReusesScalarSlotsAcrossParallelLoopTransfers(): none {
-    module_ := try! parseDoofMinus(`export func swap(%limit:int, %a:long, %b:long) -> long
+    module_ := parseDoofMinus(`export func swap(%limit:int, %a:long, %b:long) -> long
 scope done
 scope cycle
 block entry
@@ -421,10 +421,10 @@ end-scope
 block target(%left:int, %right:int)
 %answer:int = add %left, %right
 return %answer
-end`)
+end`)!
     layout := allocateWasmLocals(module_, module_.functions[0])
     Assert.equal(layout.locals.length < layout.table.values.length - 3, true)
-    execute((try! encodeDoofMinusWithLayout(module_)).bytes, "swap", `
+    execute((encodeDoofMinusWithLayout(module_)!).bytes, "swap", `
 const fs=require('fs'),assert=require('assert');
 const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
 for(let n=0;n<100;n++)assert.strictEqual(e.swap(n,9007199254740993n,-9007199254740995n),n%2?-9007199254740995n:9007199254740993n);
@@ -433,7 +433,7 @@ assert.strictEqual(e.addPhi(7,9),16);
 }
 
 export function testCodegenStackArgumentsAndMixedCarriers(): none {
-    bytes := try! compileDoofWasm(`function combine(a: int, b: int): int => a * 100 + b
+    bytes := compileDoofWasm(`function combine(a: int, b: int): int => a * 100 + b
 export function run(n: int): double {
     let result = 0.0
     for i of 0..<n {
@@ -442,7 +442,7 @@ export function run(n: int): double {
         result += double(partial) + double(long(i))
     }
     return result
-}`)
+}`)!
     execute(bytes, "mixed", `
 const fs=require('fs'),assert=require('assert');
 const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
@@ -451,7 +451,7 @@ for(let n=0;n<30;n++){let expected=0;for(let i=0;i<n;i++)expected+=300*(i+1)+9+i
 }
 
 export function testCodegenBorrowedReferencesReturnOwnershipAndDestructorOrder(): none {
-    module_ := try! parseDoofMinus(`class Box
+    module_ := parseDoofMinus(`class Box
 field value:int
 destructor Box.destroy
 end
@@ -486,9 +486,9 @@ block entry
 %second:Box = new Box(%two)
 %copy:Box = copy %first
 return
-end`)
+end`)!
     module_.imports.push(MinusImport { name: "record", importModule: "host", importName: "record", params: [MinusValue { name: "%value", typeName: "int" }], result: "none" })
-    encoded := try! encodeDoofMinusWithLayout(module_, true)
+    encoded := encodeDoofMinusWithLayout(module_, true)!
     Assert.equal(encoded.functionBodies[0] >= 0, true)
     execute(encoded.bytes, "ownership", `
 const fs=require('fs'),assert=require('assert'),events=[];
@@ -501,7 +501,7 @@ for(let p=1024;p<e.__doof_debug_heap_end.value;p+=v.getUint16(p+2,true))assert.s
 }
 
 export function testCodegenRemovesOnlyDominatedCastChecks(): none {
-    bytes := try! compileDoofWasm(`function safe(value: int | long): long {
+    bytes := compileDoofWasm(`function safe(value: int | long): long {
     case value { wide: long -> { return wide + 1L } _ -> { return 0L } }
 }
 
@@ -512,19 +512,19 @@ export function loop(n: int): long {
         result += safe(value)
     }
     return result
-}`)
+}`)!
     execute(bytes, "casts", `
 const fs=require('fs'),assert=require('assert');
 const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
 for(let n=0;n<40;n++){let expected=0n;for(let i=0;i<n;i+=2)expected+=BigInt(i+1);assert.strictEqual(e.loop(n),expected);}
 `)
-    invalid := try! parseDoofMinus(`export func bad(%value:int) -> long
+    invalid := parseDoofMinus(`export func bad(%value:int) -> long
 block entry
 %box:any = box %value
 %cast:long = cast %box, long
 return %cast
-end`)
-    execute((try! encodeDoofMinusWithLayout(invalid)).bytes, "unchecked", `
+end`)!
+    execute((encodeDoofMinusWithLayout(invalid)!).bytes, "unchecked", `
 const fs=require('fs'),assert=require('assert');
 const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
 assert.throws(()=>e.bad(7),WebAssembly.RuntimeError);
@@ -532,7 +532,7 @@ assert.throws(()=>e.bad(7),WebAssembly.RuntimeError);
 }
 
 export function testCodegenBorrowsRootedReadsAcrossLoopsAndOwnedEscapes(): none {
-    module_ := try! parseDoofMinus(`class __doof_array_char
+    module_ := parseDoofMinus(`class __doof_array_char
 field data:int
 end
 class __doof_string
@@ -596,7 +596,7 @@ block entry
 %replacement:__doof_string = string-const replacement
 set %holder.text = %replacement
 return %old
-end`)
+end`)!
     layout := allocateWasmLocals(module_, module_.functions[4])
     for index of 0..<layout.table.values.length {
         name := layout.table.values[index].name
@@ -606,7 +606,7 @@ end`)
             Assert.equal(layout.moved[index], false)
         }
     }
-    execute((try! encodeDoofMinusWithLayout(module_, true)).bytes, "rooted", `
+    execute((encodeDoofMinusWithLayout(module_, true)!).bytes, "rooted", `
 const fs=require('fs'),assert=require('assert');
 const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
 const count=p=>new DataView(e.__doof_ffi_memory.buffer).getUint32(p+4,true);
@@ -673,10 +673,10 @@ block entry
         previous = sum
     }
     source += "return " + previous + "\nend\n"
-    module_ := try! parseDoofMinus(source)
+    module_ := parseDoofMinus(source)!
     module_.imports.push(MinusImport { name: "record", importModule: "host", importName: "record", params: [MinusValue { name: "%value", typeName: "int" }], result: "none" })
     before := renderDoofMinus(module_)
-    encoded := try! encodeDoofMinusWithLayout(module_, true)
+    encoded := encodeDoofMinusWithLayout(module_, true)!
     hot := module_.functions.length - 3
     Assert.equal(encoded.functionBodies[hot] + module_.imports.length < 128, true)
     Assert.equal(encoded.functionBodies[hot], encoded.functionBodies[hot + 1])
@@ -710,10 +710,10 @@ block entry
     source += "%wide:long = convert %value\n"
     for index of 0..<20 { source += "%effect" + string(index) + ":none = call take(%wide)\n" }
     source += "return %wide\nend\n"
-    module_ := try! parseDoofMinus(source)
+    module_ := parseDoofMinus(source)!
     module_.imports.push(MinusImport { name: "record", importModule: "host", importName: "record", params: [MinusValue { name: "%value", typeName: "int" }], result: "none" })
     module_.imports.push(MinusImport { name: "take", importModule: "host", importName: "take", params: [MinusValue { name: "%value", typeName: "long" }], result: "none" })
-    execute((try! encodeDoofMinusWithLayout(module_, true)).bytes, "wide-locals", `
+    execute((encodeDoofMinusWithLayout(module_, true)!).bytes, "wide-locals", `
 const fs=require('fs'),assert=require('assert'),destroyed=[],wide=[];
 const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1])),{host:{record:n=>destroyed.push(n),take:n=>wide.push(n)}}).exports;
 for(const n of [-2147483648,-7,0,9,2147483647]){
@@ -768,10 +768,10 @@ block entry
 return
 end
 `
-    module_ := try! parseDoofMinus(source)
+    module_ := parseDoofMinus(source)!
     module_.imports.push(MinusImport { name: "record", importModule: "host", importName: "record", params: [MinusValue { name: "%value", typeName: "int" }], result: "none" })
     before := renderDoofMinus(module_)
-    encoded := try! encodeDoofMinusWithLayout(module_, true)
+    encoded := encodeDoofMinusWithLayout(module_, true)!
     Assert.equal(renderDoofMinus(module_), before)
     execute(encoded.bytes, "release-dispatch", `
 const fs=require('fs'),assert=require('assert'),events=[];
@@ -792,7 +792,7 @@ for(let p=1024;p<e.__doof_debug_heap_end.value;p+=v.getUint16(p+2,true))assert.s
 }
 
 export function testCodegenReleaseDispatchWithNoClasses(): none {
-    module_ := try! parseDoofMinus(`enum Kind
+    module_ := parseDoofMinus(`enum Kind
 end
 export func work() -> int
 block entry
@@ -800,8 +800,8 @@ block entry
 %box:any = box %value
 %result:int = const 42
 return %result
-end`)
-    encoded := try! encodeDoofMinusWithLayout(module_, true)
+end`)!
+    encoded := encodeDoofMinusWithLayout(module_, true)!
     execute(encoded.bytes, "release-no-classes", `
 const fs=require('fs'),assert=require('assert');
 const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;

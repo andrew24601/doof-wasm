@@ -11,11 +11,11 @@ import { renderDoofJs } from "./minus-js"
 
 function checkStrings(sources: SourceFile[], script: string, options: WasmLoweringOptions = WasmLoweringOptions {}): none {
   module_ := lowerDoofWasmSources{sources, entry: "/main.do", options} else error { panic(error) }
-  bytes := try! encodeDoofMinus(module_, true)
+  bytes := encodeDoofMinus(module_, true)!
   base := "/tmp/doof-string-methods-" + string(pid())
-  try! writeBlob(base + ".wasm", bytes.cloneReadonly())
-  try! writeText(base + ".mjs", renderDoofJs(module_, true))
-  result := try! run("node", ["-e", `
+  writeBlob(base + ".wasm", bytes.cloneReadonly())!
+  writeText(base + ".mjs", renderDoofJs(module_, true))!
+  result := run("node", ["-e", `
 const fs=require('fs'),assert=require('assert'),{pathToFileURL}=require('url');
 (async()=>{
 const ffi=await import(pathToFileURL(process.argv[1]+'.mjs').href);
@@ -27,9 +27,9 @@ const live=()=>heap.dumpHeap().filter(block=>block.kind!=='free').map(block=>[bl
 const baseline=live();
 ${script}
 })().catch(error=>{console.error(error);process.exit(1)});
-`, base], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
-  try! remove(base + ".wasm")
-  try! remove(base + ".mjs")
+`, base], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
+  remove(base + ".wasm")!
+  remove(base + ".mjs")!
   if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
   Assert.equal(result.exitCode, 0)
 }
@@ -61,8 +61,8 @@ export function testLiteralDataInitializesWithoutStartupCode(): none {
     pooled += prefix + "\"pooled\"\n"
   }
   sources := [SourceFile { path: "/main.do", source }]
-  distinct := try! encodeDoofMinus(try! lowerDoofWasmSources{sources, entry: "/main.do"})
-  shared := try! encodeDoofMinus(try! lowerDoofWasmSources{sources: [SourceFile { path: "/main.do", source: pooled }], entry: "/main.do"})
+  distinct := encodeDoofMinus(lowerDoofWasmSources{sources, entry: "/main.do"}!)!
+  shared := encodeDoofMinus(lowerDoofWasmSources{sources: [SourceFile { path: "/main.do", source: pooled }], entry: "/main.do"}!)!
   // Shared literals now also share function bodies. Compare the data section
   // itself so this bound measures the static object graphs.
   Assert.isTrue(dataSectionSize(distinct) - dataSectionSize(shared) < 30000, "Each literal should add its static object graph")
@@ -378,7 +378,7 @@ export function testSelfHostingRealLexerMatchesNativeTokensAndDiagnostics(): non
     rows += "[" + formatJsonValue(source) + "," + formatJsonValue(lexerSnapshot(source)) + "],"
   }
   checkStrings([
-    SourceFile { path: "/lexer.do", source: try! readText("../doof-lang/src/lexer.do") },
+    SourceFile { path: "/lexer.do", source: readText("../doof-lang/src/lexer.do")! },
     SourceFile { path: "/main.do", source: `
 import { Lexer, tokenValue } from "./lexer"
 export function scan(source: string): string {

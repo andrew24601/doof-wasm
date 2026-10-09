@@ -34,6 +34,34 @@ export function answer(): int {
   add := (amount: int): int => { box.value += amount; return box.value }
   return add(2)
 }` },
+    Fixture { name: "result-absence", source: `class Value {
+  number: int
+  read(): Result<int, string> => Success(number)
+}
+function load(mode: int): Result<Value | none, string> | none {
+  if mode == 0 { return none }
+  if mode == 1 { return Failure("missing") }
+  if mode == 2 { return Success(none) }
+  return Success(Value { number: 42 })
+}
+function propagate(): Result<int, string> {
+  let value = 0
+  try value = load(3)!.read()
+  return Success(value)
+}
+export function answer(): int {
+  absent := load(2)?.read()
+  case absent {
+    s: Success -> { if s.value != none { return 0 } }
+    _: Failure -> { return 0 }
+  }
+  if (load(0)? ?? Value { number: 7 }).number != 7 { return 0 }
+  let handled = 0
+  _ := load(1) else error { handled = if error == "missing" then 1 else 0 }
+  if handled != 1 || Success(42) != Success(42) { return 0 }
+  return propagate()!
+}` },
+    Fixture { name: "removed-prefix-unwrap", source: "export function answer(): int { value: Result<int, string> := Success(42); return try! value }" },
     Fixture { name: "large", source: "export function answer(): string => \"" + "x".repeat(262145) + "\"" },
     Fixture { name: "malformed", source: "export function answer(: int => 42" },
     Fixture { name: "type-error", source: "export function answer(): int => \"wrong\"" },

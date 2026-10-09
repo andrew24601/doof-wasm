@@ -24,7 +24,7 @@ export class WasmLocals {
     let scratch: int = 0
 }
 
-export function localCarrier(typeName: string): int {
+function localCarrier(typeName: string): int {
     if typeName == "long" { return 126 }
     if typeName == "float" { return 125 }
     if typeName == "double" { return 124 }
@@ -57,7 +57,7 @@ function extendLoops(region: MinusRegion, names: string[], starts: int[], ends: 
         let stop = -1
         let stack = [region]
         while stack.length > 0 {
-            node := try! stack.pop()
+            node := stack.pop()!
             if node.code != none {
                 for index of 0..<names.length {
                     if names[index] != node.label { continue }
@@ -149,6 +149,13 @@ function borrowReferences(module_: MinusModule, values: WasmLocals, blocks: Minu
             borrowDependency(values, preserve, owner, id, heads, targets, links)
         }
     }
+    // A scoped root owns its snapshot until `drop`, even when its source is
+    // borrowed. Propagate that finite lifetime through derived borrows.
+    for block_ of blocks {
+        for instruction of block_.instructions {
+            if instruction.op == "drop" { values.borrowed[minusValueId(values.table, instruction.args[0])] = false }
+        }
+    }
     // Start with candidate borrows, then reject any dependency on a value that
     // can lose its root. A loop-forwarding cycle is safe only when all its
     // incoming values are rooted too; one owned repeating input rejects it.
@@ -227,8 +234,12 @@ export function allocateWasmLocals(module_: MinusModule, function_: MinusFunctio
     }
     extendLoops(function_.body, names, starts, ends, first, last)
     preserve := if effects.enabled then effects.preserve else preserveReferenceLifetimes(module_)
-    borrowReferences(module_, result, blocks, preserve)
-    if effects.enabled && !preserve { borrowTransients(module_, result, blocks, flow, effects) }
+    let scoped = false
+    for block_ of blocks { for instruction of block_.instructions { if instruction.op == "drop" { scoped = true } } }
+    // Scoped roots can end before the function epilogue. Derived reads and
+    // copies must own snapshots instead of borrowing a root that is cleared.
+    borrowReferences(module_, result, blocks, preserve || scoped)
+    if effects.enabled && !preserve && !scoped { borrowTransients(module_, result, blocks, flow, effects) }
     for blockIndex of 0..<blocks.length {
         if !result.liveBlocks[blockIndex] { continue }
         instructions := blocks[blockIndex].instructions
@@ -349,7 +360,7 @@ class TransientWindow {
 function transientClosure(values: WasmLocals, candidate: bool[], children: int[][], useBlocks: int[][], escapes: bool[], id: int, window: TransientWindow): none {
     let stack = [id]
     while stack.length > 0 {
-        current := try! stack.pop()
+        current := stack.pop()!
         if escapes[current] { window.escapes = true; return }
         for block_ of useBlocks[current] { window.uses.push(block_) }
         for child of children[current] { if values.borrowed[child] || candidate[child] { stack.push(child) } }
@@ -373,7 +384,7 @@ function transientSafe(values: WasmLocals, blocks: MinusBlock[], flow: MinusCont
     for block_ of window.uses { if block_ != defBlock { pending.push(block_) } }
     let scan: int[] = []
     while pending.length > 0 {
-        block_ := try! pending.pop()
+        block_ := pending.pop()!
         if block_ == defBlock || visited[block_] { continue }
         visited[block_] = true; scan.push(block_)
         if block_ == 0 || flow.predecessors[block_].length == 0 { return false }

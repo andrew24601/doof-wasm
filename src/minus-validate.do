@@ -2,6 +2,7 @@ import { MinusControlFlow, minusBlocks, analyzeMinusControlFlow, minusDominates,
 import { parseByte, parseDouble, parseFloat, parseInt, parseLong } from "std/parse"
 import { MinusBlock, MinusClass, MinusEnum, MinusField, MinusFunction, MinusImport, MinusInstruction, MinusInterface, MinusMethod, MinusModule, MinusValue, MinusNameIndex, createMinusNameIndex, lookupMinusName, insertMinusName, minusModuleLookup } from "./minus-ir"
 import { classSize } from "./minus-layout"
+import { minusReferenceType } from "./minus-analysis"
 
 readonly MAX_BLOCK_SIZE = 1032
 
@@ -36,9 +37,8 @@ function functionByName(module_: MinusModule, name: string): MinusFunction | non
 
 function numeric(typeName: string): bool => typeName == "byte" || typeName == "int" || typeName == "long" || typeName == "float" || typeName == "double"
 function primitive(typeName: string): bool => typeName == "none" || typeName == "bool" || typeName == "char" || numeric(typeName)
-function reference(module_: MinusModule, typeName: string): bool => typeName == "any" || classByName(module_, typeName) != none || interfaceByName(module_, typeName) != none
-function arrayElementType(module_: MinusModule, typeName: string): bool => (typeName != "none" && primitive(typeName)) || reference(module_, typeName) || enumByName(module_, typeName) != none
-function hostExportType(module_: MinusModule, typeName: string): bool => !reference(module_, typeName) || typeName == "__doof_string"
+function arrayElementType(module_: MinusModule, typeName: string): bool => (typeName != "none" && primitive(typeName)) || minusReferenceType(module_, typeName) || enumByName(module_, typeName) != none
+function hostExportType(module_: MinusModule, typeName: string): bool => !minusReferenceType(module_, typeName) || typeName == "__doof_string"
 
 function letter(code: int): bool => (code >= 97 && code <= 122) || (code >= 65 && code <= 90) || code == 95
 
@@ -184,7 +184,7 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, blocks
         try left := valueType(values, args[0], line)
         try right := valueType(values, args[1], line)
         if op == "rem" && !(left == "byte" || left == "int" || left == "long") { return Failure(problem(line, "rem needs integer operands")) }
-        if left != right || (!numeric(left) && !(op == "eq" && (left == "bool" || left == "char" || left == "none" || reference(module_, left) || enumByName(module_, left) != none)) && !(op == "lt" && left == "char")) {
+        if left != right || (!numeric(left) && !(op == "eq" && (left == "bool" || left == "char" || left == "none" || minusReferenceType(module_, left) || enumByName(module_, left) != none)) && !(op == "lt" && left == "char")) {
             return Failure(problem(line, op + " needs matching supported operands"))
         }
         return Success(if op == "eq" || op == "lt" then "bool" else left)
@@ -224,7 +224,7 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, blocks
             try typeName := valueType(values, args[index], line)
             if typeName != "int" { return Failure(problem(line, "array-copy handles, indexes, and count need int")) }
         }
-        if !arrayElementType(module_, args[5]) || reference(module_, args[5]) { return Failure(problem(line, "array-copy needs a scalar element type")) }
+        if !arrayElementType(module_, args[5]) || minusReferenceType(module_, args[5]) { return Failure(problem(line, "array-copy needs a scalar element type")) }
         return Success(none)
     }
     if op == "array-compare" || op == "array-equal" {
@@ -342,6 +342,12 @@ function checkInstruction(module_: MinusModule, function_: MinusFunction, blocks
         try checkType(module_, args[1], line)
         if args[1] == "any" { return Failure(problem(line, op + " needs a primitive, class, or interface target")) }
         return Success(if op == "is" then "bool" else args[1])
+    }
+    if op == "drop" {
+        if args.length != 1 { return Failure(problem(line, "drop needs one reference value")) }
+        try source := valueType(values, args[0], line)
+        if source != "any" && classByName(module_, source) == none && interfaceByName(module_, source) == none { return Failure(problem(line, "drop needs a reference value")) }
+        return Success(none)
     }
     if op == "return" {
         if args.length > 1 { return Failure(problem(line, "return takes at most one value")) }
@@ -533,9 +539,14 @@ export function validateDoofMinus(module_: MinusModule): Result<none, string> {
                 terminal := instruction.op == "return" || instruction.op == "jump" || instruction.op == "branch" || instruction.op == "panic"
                 if terminal != (position == block.instructions.length - 1) { return Failure(problem(instruction.line, "block terminator must be last")) }
                 if instruction.result != none { try checkType(module_, instruction.result!.typeName, instruction.line) }
-                inferred := checkInstruction(module_, function_, blocks, values, instruction) else error {
+                let inferred: string | none = none
+                case checkInstruction(module_, function_, blocks, values, instruction) {
+                  success: Success -> { inferred = success.value }
+                  failure: Failure -> {
+                    error := failure.error
                     path := if instruction.sourcePath == "" then function_.sourcePath else instruction.sourcePath
                     return Failure(if path == "" then error else path + ": " + error)
+                  }
                 }
                 if instruction.result == none {
                     if inferred != none { return Failure(problem(instruction.line, "operation needs a result")) }

@@ -12,11 +12,11 @@ import { renderDoofJs } from "./minus-js"
 import { encodeWasmHex } from "./selfhost-hex"
 
 function checkFormatting(module_: MinusModule, script: string): none {
-  bytes := try! encodeDoofMinus(module_, true)
+  bytes := encodeDoofMinus(module_, true)!
   base := "/tmp/doof-formatting-" + string(pid())
-  try! writeBlob(base + ".wasm", bytes.cloneReadonly())
-  try! writeText(base + ".mjs", renderDoofJs(module_, true))
-  result := try! run("node", ["-e", `
+  writeBlob(base + ".wasm", bytes.cloneReadonly())!
+  writeText(base + ".mjs", renderDoofJs(module_, true))!
+  result := run("node", ["-e", `
 const fs=require('fs'),assert=require('assert'),{pathToFileURL}=require('url');
 (async()=>{
 const ffi=await import(pathToFileURL(process.argv[1]+'.mjs').href);
@@ -28,9 +28,9 @@ const baseline=live();
 ${script}
 assert.deepStrictEqual(live(),baseline,'formatting releases temporary strings and boxes');
 })().catch(error=>{console.error(error);process.exit(1)});
-`, base], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
-  try! remove(base + ".wasm")
-  try! remove(base + ".mjs")
+`, base], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
+  remove(base + ".wasm")!
+  remove(base + ".mjs")!
   if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
   Assert.equal(result.exitCode, 0)
 }
@@ -42,7 +42,7 @@ export function render(i: int, l: long, b: byte, flag: bool, c: char, f: float, 
 export function adjacent(value: int, flag: bool): string => "\${value}\${flag}"
 export function plain(): string => "no expressions"
 `
-  module_ := try! lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  module_ := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")!
   i := -2147483647 - 1
   l := -9223372036854775807L - 1L
   b := byte(255)
@@ -75,7 +75,7 @@ export function ordered(flag: bool): string {
 }
 export function nested(flag: bool): string => "outer=\${if flag then "inner=\${2}" else "no"}!"
 `
-  module_ := try! lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  module_ := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")!
   checkFormatting(module_, `
 for(let i=0;i<30;i++){
  assert.strictEqual(api.ordered(true),'changed:1:A2:B3:true:3');
@@ -112,7 +112,7 @@ export function caughtInvalid(): string {
 }
 ` },
   ]
-  module_ := try! lowerDoofWasmSources{sources, entry: "/main.do", options: WasmLoweringOptions { synchronousAsync: true }}
+  module_ := lowerDoofWasmSources{sources, entry: "/main.do", options: WasmLoweringOptions { synchronousAsync: true }}!
   // Exercise the native invalid-enum path by corrupting only the producer's
   // backing constant. Checked Doof source cannot manufacture invalid enums.
   for function_ of module_.functions {
@@ -143,7 +143,7 @@ export function testSelfHostingHexPublicationMatchesNative(): none {
   for index of 0..<1025 { bytes.push(byte(index % 256)) }
   nativeHex := formatJsonValue(encodeWasmHex(bytes))
   sources := [
-    SourceFile { path: "/selfhost-hex.do", source: try! readText("src/selfhost-hex.do") },
+    SourceFile { path: "/selfhost-hex.do", source: readText("src/selfhost-hex.do")! },
     SourceFile { path: "/main.do", source: `
 import { encodeWasmHex } from "./selfhost-hex"
 export function encode(count: int): string {
@@ -154,7 +154,7 @@ export function encode(count: int): string {
 }
 ` },
   ]
-  module_ := try! lowerDoofWasmSources(sources, "/main.do")
+  module_ := lowerDoofWasmSources(sources, "/main.do")!
   checkFormatting(module_, `
 assert.strictEqual(api.encode(1025),${nativeHex});
 for(const size of [0,1,255,256,257,1023,1024,1025,262145]){

@@ -9,15 +9,15 @@ import { encodeDoofMinusWithLayout } from "./minus-wasm"
 
 function execute(bytes: byte[], name: string, script: string): none {
     path := "/tmp/doof-folding-" + string(pid()) + "-" + name + ".wasm"
-    try! writeBlob(path, bytes.cloneReadonly())
-    result := try! run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
-    try! remove(path)
+    writeBlob(path, bytes.cloneReadonly())!
+    result := run("node", ["-e", script, path], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
+    remove(path)!
     if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
     Assert.equal(result.exitCode, 0)
 }
 
 export function testFoldsBodiesAndCallersWhilePreservingExports(): none {
-    module_ := try! parseDoofMinus(`func first(%value:int) -> int
+    module_ := parseDoofMinus(`func first(%value:int) -> int
 block entry
 %one:int = const 1
 %answer:int = add %value, %one
@@ -45,17 +45,17 @@ block entry
 %right:int = call right(%value)
 %sum:int = add %left, %right
 return %sum
-end`)
+end`)!
     module_.functions[2].exportName = "renamed"
     original := renderDoofMinus(module_)
-    encoded := try! encodeDoofMinusWithLayout(module_)
+    encoded := encodeDoofMinusWithLayout(module_)!
     Assert.equal(encoded.definedFunctions, 6)
     Assert.equal(encoded.typeCount, 3)
     Assert.equal(encoded.functionBodies[0], encoded.functionBodies[1])
     Assert.equal(encoded.functionBodies[2], encoded.functionBodies[3])
     Assert.notEqual(encoded.functionBodies[0], encoded.functionBodies[2])
     Assert.equal(renderDoofMinus(module_), original)
-    Assert.arrayEqual(encoded.bytes.cloneReadonly(), (try! encodeDoofMinusWithLayout(module_)).bytes.cloneReadonly())
+    Assert.arrayEqual(encoded.bytes.cloneReadonly(), (encodeDoofMinusWithLayout(module_)!).bytes.cloneReadonly())
     execute(encoded.bytes, "calls", `
 const fs=require('fs'),assert=require('assert');
 const e=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1]))).exports;
@@ -68,7 +68,7 @@ for(const n of [-100,0,41,1000]) {
 }
 
 export function testSignaturesAndScalarNormalizationPreventUnsafeFolding(): none {
-    module_ := try! parseDoofMinus(`export func dropInt(%value:int) -> none
+    module_ := parseDoofMinus(`export func dropInt(%value:int) -> none
 block entry
 return
 end
@@ -95,8 +95,8 @@ end
 export func narrow(%value:byte) -> byte
 block entry
 return %value
-end`)
-    encoded := try! encodeDoofMinusWithLayout(module_)
+end`)!
+    encoded := encodeDoofMinusWithLayout(module_)!
     Assert.equal(encoded.typeCount, 6)
     for left of 0..<module_.functions.length {
         for right of (left + 1)..<module_.functions.length { Assert.notEqual(encoded.functionBodies[left], encoded.functionBodies[right]) }
@@ -110,7 +110,7 @@ assert.strictEqual(e.integer(-1),-1);assert.strictEqual(e.boolean(-1),1);assert.
 }
 
 export function testDistinctImportsStayDistinctAndCallsAreRelocated(): none {
-    module_ := try! parseDoofMinus(`export func left(%value:int) -> int
+    module_ := parseDoofMinus(`export func left(%value:int) -> int
 block entry
 %answer:int = call externalLeft(%value)
 return %answer
@@ -119,11 +119,11 @@ export func right(%value:int) -> int
 block entry
 %answer:int = call externalRight(%value)
 return %answer
-end`)
+end`)!
     for name of ["externalLeft", "externalRight"] {
         module_.imports.push(MinusImport { name, importModule: "host", importName: name, params: [MinusValue { name: "%value", typeName: "int" }], result: "int" })
     }
-    encoded := try! encodeDoofMinusWithLayout(module_)
+    encoded := encodeDoofMinusWithLayout(module_)!
     Assert.equal(encoded.typeCount, 3)
     Assert.notEqual(encoded.functionBodies[0], encoded.functionBodies[1])
     execute(encoded.bytes, "imports", `
@@ -134,7 +134,7 @@ assert.strictEqual(e.left(40),41);assert.strictEqual(e.right(40),42);
 }
 
 export function testFoldedMethodsPreserveIndirectDispatchAndOwnership(): none {
-    module_ := try! parseDoofMinus(`interface Readable
+    module_ := parseDoofMinus(`interface Readable
 method get() -> int
 end
 class First implements Readable
@@ -168,8 +168,8 @@ block entry
 %reader:Readable = as %object
 %result:int = call %reader.get()
 return %result
-end`)
-    encoded := try! encodeDoofMinusWithLayout(module_, true)
+end`)!
+    encoded := encodeDoofMinusWithLayout(module_, true)!
     Assert.equal(encoded.functionBodies[0], encoded.functionBodies[1])
     execute(encoded.bytes, "methods", `
 const fs=require('fs'),assert=require('assert');
@@ -181,7 +181,7 @@ for(let p=1024;p<e.__doof_debug_heap_end.value;p+=v.getUint16(p+2,true))assert.s
 }
 
 export function testFoldedGlobalInitializersRemainValidStartCalls(): none {
-    module_ := try! parseDoofMinus(`global FIRST:int = first
+    module_ := parseDoofMinus(`global FIRST:int = first
 global SECOND:int = second
 func first() -> int
 block entry
@@ -199,8 +199,8 @@ block entry
 %right:int = global-get SECOND
 %sum:int = add %left, %right
 return %sum
-end`)
-    encoded := try! encodeDoofMinusWithLayout(module_)
+end`)!
+    encoded := encodeDoofMinusWithLayout(module_)!
     Assert.equal(encoded.functionBodies[0], encoded.functionBodies[1])
     execute(encoded.bytes, "globals", `
 const fs=require('fs'),assert=require('assert');

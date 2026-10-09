@@ -1,11 +1,8 @@
-import { createMinusFunction } from "./minus-build"
+import { createMinusFunction, instruction, value } from "./minus-build"
 // Compiler cache maps share the owned, chunk-backed array runtime. Lookup is
 // linear and compares string contents; updating an entry preserves its key.
 import { MinusModule, MinusClass, MinusField, MinusFunction, MinusBlock, MinusInstruction, MinusValue } from "./minus-ir"
 import { STRING_BOOL_MAP_CLASS, STRING_CLASS, RESULT_SUCCESS_CLASS, RESULT_FAILURE_CLASS, arrayClassName } from "./doof-lowering-constants"
-
-function value(name: string, typeName: string): MinusValue => MinusValue { name, typeName }
-function instruction(op: string, args: string[], name: string = "", typeName: string = "none"): MinusInstruction => MinusInstruction { op, args, result: if name == "" then none else value(name, typeName) }
 
 export function injectStringBoolMap(module_: MinusModule): none {
   keysType := arrayClassName(STRING_CLASS)

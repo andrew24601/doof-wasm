@@ -10,16 +10,16 @@ import { parseDoofMinus } from "./minus-parse"
 import { renderDoofJs } from "./minus-js"
 
 function checkArrays(source: string, name: string, script: string): none {
-  module_ := try! lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
+  module_ := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")!
   checkModule(module_, name, script)
 }
 
 function checkModule(module_: MinusModule, name: string, script: string): none {
-  bytes := try! encodeDoofMinus(module_, true)
+  bytes := encodeDoofMinus(module_, true)!
   path := "/tmp/doof-array-methods-" + string(pid()) + "-" + name
-  try! writeBlob(path + ".wasm", bytes.cloneReadonly())
-  try! writeText(path + ".mjs", renderDoofJs(module_, true))
-  result := try! run("node", ["-e", `
+  writeBlob(path + ".wasm", bytes.cloneReadonly())!
+  writeText(path + ".mjs", renderDoofJs(module_, true))!
+  result := run("node", ["-e", `
 const fs = require('fs'), assert = require('assert'), {pathToFileURL} = require('url');
 (async () => {
   const ffi = await import(pathToFileURL(process.argv[2]).href);
@@ -30,9 +30,9 @@ const fs = require('fs'), assert = require('assert'), {pathToFileURL} = require(
   const baseline = live();
   ${script}
 })().catch(error => { console.error(error); process.exit(1); });
-`, path + ".wasm", path + ".mjs"], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
-  try! remove(path + ".wasm")
-  try! remove(path + ".mjs")
+`, path + ".wasm", path + ".mjs"], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
+  remove(path + ".wasm")!
+  remove(path + ".mjs")!
   if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
   Assert.equal(result.exitCode, 0)
 }
@@ -128,7 +128,7 @@ export function testReadonlyArraysAllowContainsAndRejectPush(): none {
 }
 
 export function testPushAcrossUpperRadixBoundaryAndLengthOverflow(): none {
-  module_ := try! parseDoofMinus(`
+  module_ := parseDoofMinus(`
 export func make(%length:int) -> int
 block entry
 %data:int = array-alloc %length,int
@@ -154,7 +154,7 @@ block entry
 array-free %data
 return
 end
-`)
+`)!
   checkModule(module_, "upper-radix", `
 const length = 65536*256;
 for (let repeat=0;repeat<2;repeat++) {
@@ -293,12 +293,12 @@ readonly TEXTS = [${entries}, ""]
 export function pool(index: int): string => TEXTS[index]
 export function literal(): string => "${literal}"
 `
-  module_ := try! lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")
-  first := try! encodeDoofMinus(module_, true)
+  module_ := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do")!
+  first := encodeDoofMinus(module_, true)!
   // A literal's bytes belong in data; startup code must not grow per character.
   Assert.isTrue(first.length < 1000000, "Large literal and 261 pooled entries must remain compact: " + string(first.length))
-  _ := try! encodeDoofMinus(try! parseDoofMinus("export func answer() -> int\nblock entry\n%value:int = const 42\nreturn %value\nend"))
-  second := try! encodeDoofMinus(module_, true)
+  _ := encodeDoofMinus(parseDoofMinus("export func answer() -> int\nblock entry\n%value:int = const 42\nreturn %value\nend")!)!
+  second := encodeDoofMinus(module_, true)!
   Assert.arrayEqual(second.cloneReadonly(), first.cloneReadonly(), "Pool state must be local to each encoding call")
   checkModule(module_, "passive-literal-pool", `
 const expected=('z'.repeat(1024)+'\\0').repeat(256)+'!';
@@ -333,15 +333,15 @@ export function check(length: int): bool {
   for i of 0..<length { values.push(${last[index]}) }
   values.reserve(1)
   for i of 0..<length {
-    item := try! alias.pop()
+    item := alias.pop()!
     if item != ${last[index]} || values.length != length - i { return false }
   }
-  item := try! values.pop()
+  item := values.pop()!
   if item != ${first[index]} || alias.length != 0 { return false }
   failed := values.pop() else message {
     if message != "Attempted to pop from empty array" { return false }
     alias.push(${last[index]})
-    return (try! values.pop()) == ${last[index]} && alias.length == 0
+    return (values.pop()!) == ${last[index]} && alias.length == 0
   }
   return false
 }
@@ -376,7 +376,7 @@ export function check(length: int): bool {
   for i of 0..<length { values.push(${values[index]}) }
   for i of 0..<length {
     completion := alias.pop()
-    item := try! completion
+    item := completion!
     if ${reads[index]} != ${if index == 3 then "string(length - i - 1).length" else "length - i - 1"} { return false }
   }
   // Refill at a chunk boundary after popping, exercising existing capacity.
@@ -386,7 +386,7 @@ export function check(length: int): bool {
 export function detached(): string {
   values: string[] := ["survives"]
   completion := values.pop()
-  return try! completion
+  return completion!
 }
 export function discarded(): none {
   values := [Box { value: 42 }]
@@ -403,7 +403,7 @@ for(let i=0;i<10;i++){assert.strictEqual(api.detached(),'survives');api.discarde
 }
 
 export function testReserveCapacityIsAllocatedAndRawPopTrapsWhenEmpty(): none {
-  module_ := try! parseDoofMinus(`
+  module_ := parseDoofMinus(`
 export func make() -> int
 block entry
 %zero:int = const 0
@@ -435,7 +435,7 @@ block entry
 array-free %data
 return
 end
-`)
+`)!
   checkModule(module_, "reserved-capacity", `
 for(const capacity of [0,1,5,17,256,257,65537]) {
  let data=api.reserve(api.make(),capacity);assert.strictEqual(api.length(data),0);

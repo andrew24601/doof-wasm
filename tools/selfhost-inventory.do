@@ -7,7 +7,7 @@ import { nativeSourceEnvironment } from "../src/source-environment-native"
 
 function main(arguments: string[]): int {
   if arguments.length != 1 { println("usage: selfhost-inventory entry.do"); return 2 }
-  entry := try! absolute(arguments[0])
+  entry := absolute(arguments[0])!
   source := readText(entry) else { println("could not read " + entry); return 1 }
   environment := nativeSourceEnvironment(entry, "std/wasm") else error { println(error); return 1 }
   analyzer := createAnalyzerWithLoader([SourceFile { path: entry, source }], (path: string): Result<SourceFile | none, Diagnostic> => environment.load(path))

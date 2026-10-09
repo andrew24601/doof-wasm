@@ -14,23 +14,23 @@ import { renderDoofJs } from "./minus-js"
 import { nativeSourceEnvironment } from "./source-environment-native"
 
 function runStdSource(source: string, name: string, script: string, options: WasmLoweringOptions = WasmLoweringOptions {}): none {
-  environment := try! nativeSourceEnvironment("src/doof-cli.do", "std/wasm")
+  environment := nativeSourceEnvironment("src/doof-cli.do", "std/wasm")!
   lowered := lowerDoofWasmSources([SourceFile { path: "/main.do", source }], "/main.do", (path: string): Result<SourceFile | none, Diagnostic> => environment.load(path), options)
   module_ := lowered else error { panic(error) }
-  bytes := try! encodeDoofMinus(module_, true)
+  bytes := encodeDoofMinus(module_, true)!
   base := "/tmp/doof-wasm-stdlib-" + string(pid()) + "-" + name
-  try! writeBlob(base + ".wasm", bytes.cloneReadonly())
-  try! writeText(base + ".mjs", renderDoofJs(module_, true))
-  result := try! run("node", ["-e", `
+  writeBlob(base + ".wasm", bytes.cloneReadonly())!
+  writeText(base + ".mjs", renderDoofJs(module_, true))!
+  result := run("node", ["-e", `
 const fs=require('fs'), assert=require('assert'), {pathToFileURL}=require('url');
 (async()=>{
 const ffi=await import(pathToFileURL(process.argv[1]+'.mjs').href);
 const bytes=fs.readFileSync(process.argv[1]+'.wasm');
 ${script}
 })().catch(error=>{console.error(error);process.exit(1)});
-`, base], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })
-  try! remove(base + ".wasm")
-  try! remove(base + ".mjs")
+`, base], ExecOptions { withStdin: false, mergeStderrIntoStdout: true })!
+  remove(base + ".wasm")!
+  remove(base + ".mjs")!
   if result.exitCode != 0 { println(BlobReader(result.stdout).readString(long(result.stdout.length))) }
   Assert.equal(result.exitCode, 0)
 }
@@ -171,8 +171,8 @@ assert.strictEqual(limit.doofStdMonotonicNanos(),9223372036854775807n);
 
 export function testWasmFloatingFormattingMatchesNative(): none {
   let fixtures = "["
-  tiny := try! parseDouble("1e-100")
-  large := try! parseDouble("1e100")
+  tiny := parseDouble("1e-100")!
+  large := parseDouble("1e100")!
   for value of [0.0, -0.0, 1.25, -1.25, 0.00001, 0.0001, 100000.0, 1000000.0, 123456.5, 123457.5, -123456.5, 1234567.0, 1.23456789, 9.999999, tiny, large] {
     if fixtures != "[" { fixtures += "," }
     // Exact IEEE bytes carry the input; the expected spelling is native Doof.
@@ -287,7 +287,7 @@ export function testWasmStdlibSelfHostedEncoderMatchesNativeBytes(): none {
   for typeName of ["int", "long", "float", "double"] {
     literal := if typeName == "int" then "42" else if typeName == "long" then "-9223372036854775808" else "-1.5"
     fixture := "export func answer() -> " + typeName + "\nblock entry\n%answer:" + typeName + " = const " + literal + "\nreturn %answer\nend\n"
-    native := try! compileDoofMinus(fixture)
+    native := compileDoofMinus(fixture)!
     if fixtures != "[" { fixtures += "," }
     fixtures += "{source:'export func answer() -> " + typeName + "\\nblock entry\\n%answer:" + typeName + " = const " + literal + "\\nreturn %answer\\nend\\n',bytes:["
     for index of 0..<native.length {
